@@ -76,29 +76,27 @@ void rotary_position_embedding_kernel(
     int64_t _start_pos = start_pos;
     if (cu_start_pos != nullptr)
         _start_pos = cu_start_pos[0];
-    const int64_t dim_idx_over_all = blockIdx.z * TPB + threadIdx.x;
+    const int64_t tid = blockIdx.z * TPB + threadIdx.x;
 
-    if (dim_idx_over_all < head_dim * num_heads) {
-        const int64_t head_idx = dim_idx_over_all / head_dim;
-        const int64_t dim_dix = dim_idx_over_all % head_dim;
+    if (tid < head_dim * num_heads) {
+        const int64_t head_idx = tid / head_dim;
+        const int64_t dim_dix = tid % head_dim;
         const int64_t pos_idx = _start_pos + blockIdx.y;
 
         const int64_t token_idx = (blockIdx.x * seqlen + blockIdx.y);
-        const int64_t q_idx = token_idx * query_stride_s + dim_idx_over_all;
-        const int64_t k_idx = token_idx * key_stride_s + dim_idx_over_all;
-        const int64_t rq_idx = token_idx * rotated_query_stride_s + dim_idx_over_all;
-        const int64_t rk_idx = token_idx * rotated_key_stride_s + dim_idx_over_all;
-
-        float2 q, k, b;
+        const int64_t q_idx = token_idx * query_stride_s + tid;
+        const int64_t k_idx = token_idx * key_stride_s + tid;
+        const int64_t rq_idx = token_idx * rotated_query_stride_s + tid;
+        const int64_t rk_idx = token_idx * rotated_key_stride_s + tid;
 
         if (dim_dix >= rotary_dim) {
             rotated_query[rq_idx] = query[q_idx];
             if (head_idx < num_key_heads)
                 rotated_key[rk_idx] = key[k_idx];
         } else {
-            q = __half22float2(query[q_idx]);
+            const float2 q = __half22float2(query[q_idx]);
 
-            b = rotary_position_embedding_coeff(
+            const float2 b = rotary_position_embedding_coeff(
                 dim_dix, pos_idx, head_dim, theta);
 
             rotated_query[rq_idx] = {
@@ -110,7 +108,7 @@ void rotary_position_embedding_kernel(
                 if (bypass_key) {
                     rotated_key[rk_idx] = key[k_idx];
                 } else {
-                    k = __half22float2(key[k_idx]);
+                    const float2 k = __half22float2(key[k_idx]);
 
                     rotated_key[rk_idx] = {
                         __float2half(k.x * b.x - k.y * b.y),
@@ -227,44 +225,42 @@ void dynamic_batching_rotary_position_embedding_kernel(
         const int64_t batch_idx = blockIdx.x;
         const int64_t seq_idx = blockIdx.y;
 
-        for (int64_t dim_idx_over_all = threadIdx.x;
-            dim_idx_over_all < num_heads * head_dim;
-            dim_idx_over_all += blockDim.x)
+        const int64_t token_idx = seqstarts[batch_idx] + seq_idx;
+        const int64_t pos_idx = seq_idx + start_pos[batch_idx];
+        auto q_ptr = query + token_idx * query_stride_s;
+        auto k_ptr = key + token_idx * key_stride_s;
+        auto rq_ptr = rotated_query + token_idx * rotated_query_stride_s;
+        auto rk_ptr = rotated_key + token_idx * rotated_key_stride_s;
+
+        for (int64_t tid = threadIdx.x;
+            tid < num_heads * head_dim;
+            tid += blockDim.x)
         {
-            const int64_t head_idx = dim_idx_over_all / head_dim;
-            const int64_t dim_dix = dim_idx_over_all % head_dim;
-            const int64_t token_idx = seqstarts[batch_idx] + seq_idx;
-            const int64_t pos_idx = seq_idx + start_pos[batch_idx];
-
-            const int64_t q_idx = token_idx * query_stride_s + dim_idx_over_all;
-            const int64_t k_idx = token_idx * key_stride_s + dim_idx_over_all;
-            const int64_t rq_idx = token_idx * rotated_query_stride_s + dim_idx_over_all;
-            const int64_t rk_idx = token_idx * rotated_key_stride_s + dim_idx_over_all;
-
-            float2 q, k, b;
+            const int64_t head_idx = tid / head_dim;
+            const int64_t dim_dix = tid % head_dim;
 
             if (dim_dix >= rotary_dim) {
-                rotated_query[rq_idx] = query[q_idx];
+                rq_ptr[tid] = q_ptr[tid];
                 if (head_idx < num_key_heads)
-                    rotated_key[rk_idx] = key[k_idx];
+                    rk_ptr[tid] = k_ptr[tid];
             } else {
-                q = __half22float2(query[q_idx]);
+                const float2 q = __half22float2(q_ptr[tid]);
 
-                b = rotary_position_embedding_coeff(
+                const float2 b = rotary_position_embedding_coeff(
                     dim_dix, pos_idx, head_dim, theta);
 
-                rotated_query[rq_idx] = {
+                rq_ptr[tid] = {
                     __float2half(q.x * b.x - q.y * b.y),
                     __float2half(q.y * b.x + q.x * b.y)
                 };
 
                 if (head_idx < num_key_heads) {
                     if (bypass_key) {
-                        rotated_key[rk_idx] = key[k_idx];
+                        rk_ptr[tid] = k_ptr[tid];
                     } else {
-                        k = __half22float2(key[k_idx]);
+                        const float2 k = __half22float2(k_ptr[tid]);
 
-                        rotated_key[rk_idx] = {
+                        rk_ptr[tid] = {
                             __float2half(k.x * b.x - k.y * b.y),
                             __float2half(k.y * b.x + k.x * b.y)
                         };
