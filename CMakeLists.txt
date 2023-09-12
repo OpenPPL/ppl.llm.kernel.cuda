@@ -20,6 +20,7 @@ endif()
 # --------------------------------------------------------------------------- #
 
 # dependencies
+set(PPLCOMMON_USE_CUDA ON)
 if (PPLNN_CUDA_ENABLE_NCCL)
     set(PPLCOMMON_ENABLE_NCCL ON)
 endif()
