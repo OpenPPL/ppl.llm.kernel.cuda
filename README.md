@@ -4,6 +4,8 @@
 
 Primitive cuda kernel library for [ppl.nn.llm](https://github.com/openppl-public/ppl.nn.llm)
 
+Currently, only Ampere and Hopper have been tested.
+
 ## Prerequisites
 
 * Linux running on x86_64 or arm64 CPUs
