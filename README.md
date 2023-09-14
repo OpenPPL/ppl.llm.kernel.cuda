@@ -2,6 +2,14 @@
 
 ## Overview
 
+`ppl.llm.kernel.cuda` is a part of `PPL.LLM` system.
+
+![SYSTEM_OVERVIEW](https://github.com/openppl-public/ppl.nn.llm/blob/master/docs/system_overview.png)
+
+**We recommend users who are new to this project to read the [Overview of system](https://github.com/openppl-public/ppl.nn.llm/blob/master/docs/system_overview.md).**
+
+---
+
 Primitive cuda kernel library for [ppl.nn.llm](https://github.com/openppl-public/ppl.nn.llm)
 
 Currently, only Ampere and Hopper have been tested.
