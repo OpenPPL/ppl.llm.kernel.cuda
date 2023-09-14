@@ -42,9 +42,9 @@ ppl::common::RetCode skip_rmsnorm_with_minmax_quant_fp16i_int8o(
   const float eps,                // 1e-7
   const int64_t num_of_batch      // x 第一维的大小
   const int64_t normalize_shape,  // x 的最后一维大小
-  fp16_t *o1,                     // x + skip, 形如 [batch, hidden dim]
-  fp16_t *o2_scale,               // quant(rmsnorm(x + skip)), 形如 [batch]
-  int8_t *o2                      // quant(rmsnorm(x + skip)), 形如 [batch, hidden dim]
+  fp16_t *skip_out,               // x + skip, 形如 [batch, hidden dim]
+  fp16_t *out_scale,              // quant(rmsnorm(x + skip)), 形如 [batch]
+  int8_t *out                     // quant(rmsnorm(x + skip)), 形如 [batch, hidden dim]
 );
 
 }}}}}}
