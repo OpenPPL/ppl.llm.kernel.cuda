@@ -39,6 +39,22 @@ void embedding_kernel(
     copy<sizeof(half) * VPT>(&weight[weight_idx], &output[output_idx]);
 }
 
+template<int TPB>
+__global__ 
+void embedding_kernel_default(
+    const int64_t* indices,
+    const half* weight,
+    half* output,
+    const int64_t embedding_dim)
+{
+    int64_t index = indices[blockIdx.x];
+    for(int64_t idx = threadIdx.x; idx < embedding_dim; idx += TPB) {
+        int64_t weight_idx = index * embedding_dim + idx;
+        int64_t output_idx = blockIdx.x * embedding_dim + idx;
+        output[output_idx] = weight[weight_idx];
+    }
+}
+
 ppl::common::RetCode parallel_embedding(
     const cudaStream_t stream,
     const ppl::common::TensorShape* indices_shape,
@@ -99,8 +115,11 @@ ppl::common::RetCode parallel_embedding(
             Ew);
         break;
     default:
-        LOG(ERROR) << "currently do not support embedding_dim " << embedding_dim;
-        return ppl::common::RC_UNSUPPORTED;
+        embedding_kernel_default<512><<<num_indices, 512, 0, stream>>>(
+            (int64_t*)indices,
+            (half*)weight,
+            (half*)kernel_output,
+            Ew);
     }
 
     if (nccl_param->size > 1) {

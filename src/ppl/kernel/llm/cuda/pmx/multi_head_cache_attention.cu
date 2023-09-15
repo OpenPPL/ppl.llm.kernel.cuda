@@ -194,21 +194,18 @@ template<
     int32_t THREAD_GROUP_SIZE,        // how many threads inside a group
     int32_t TPB,
     int32_t QUANT_GROUP,
-    bool SHIFT_KV>
+    bool SHIFT_KV,
+    int32_t CACHE_MODE>
 __global__
 void dynamic_batching_decoding_cache_attention_fp16_kernel(
     half* __restrict__ output,          // [context_lens, num_heads..., head_size]
     const half* __restrict__ query,     // [seq_lens, num_heads..., head_size]
     const float attn_scale,
     const int64_t layer_idx,
+    const int64_t num_layer,
     const int64_t kv_head_shift,        // !!! Use this if (num_heads/num_kv_heads) is power of 2  or zero, otherwise set SHIFT_KV to false.
     const int64_t num_kv_repeats,       // And then we will use this one to compute kv_head_idx, but the performance will lost 10%
-    const int64_t query_stride_s,
-    const int64_t output_stride_s,
-    const int64_t cache_stride_s,
-    const int64_t cache_stride_l,
-    const int64_t cache_stride_h,
-    const int64_t cache_stride_kv,
+    const int64_t max_token,
     const int8_t* cache,                // [max_token, num_layer, 2, num_kv_heads, head_size]
     const half* scale,                  // [max_token, num_layer, 2, num_kv_heads, head_size / quant_group(8)]
     const int64_t* cachestarts,
@@ -241,7 +238,7 @@ void dynamic_batching_decoding_cache_attention_fp16_kernel(
     constexpr int64_t GPW       = WARP_SIZE / THREAD_GROUP_SIZE;       // thread group per warp
     constexpr int64_t GPT       = WARP_SIZE / THREAD_GROUP_SIZE * WPT; // thread group per thread block
 
-    // const int64_t num_heads     = gridDim.x;
+    const int64_t num_heads     = gridDim.x;
     const int64_t head_idx      = blockIdx.x;
     const int64_t batch_idx     = blockIdx.y;
     constexpr int64_t VEC_SIZE  = 16 / sizeof(half);  // 128 bits
@@ -269,13 +266,31 @@ void dynamic_batching_decoding_cache_attention_fp16_kernel(
                                     ? (head_idx >> kv_head_shift)
                                     : (head_idx / num_kv_repeats);
 
+    static constexpr uint32_t I8s_TO_F16s_MAGIC_NUM = 0x64806480;
+    static constexpr uint32_t mask_for_elt_01     = 0x5150;
+    static constexpr uint32_t mask_for_elt_23     = 0x5352;
+    static constexpr uint32_t start_byte_for_fp16 = 0x64646464;
+
+
+    int64_t token_stride  = num_layer * 2 * num_heads * HEAD_SIZE;
+    int64_t layer_stride  = 2 * num_heads * HEAD_SIZE;
+    int64_t kv_stride = num_heads * HEAD_SIZE;
+    int64_t head_stride =  HEAD_SIZE;
+    const int64_t embed_stride  = num_heads * HEAD_SIZE;
+
+    if(CACHE_MODE == 2) {
+        token_stride  = HEAD_SIZE;
+        layer_stride  = 2 * num_heads * max_token * HEAD_SIZE;
+        kv_stride = num_heads * max_token * HEAD_SIZE;
+        head_stride =  max_token * HEAD_SIZE;
+    }
+
     #pragma unroll
     for (int64_t i = 0; i < VEC_LEN; i++) {
         // copy 128(16 * 8) bits from Q to Local Q
-
         copy<sizeof(half) * VEC_SIZE>(
             &query[
-                batch_idx * query_stride_s +
+                batch_idx * embed_stride +
                 head_idx * HEAD_SIZE +
                 (group_lane_id + i * THREAD_GROUP_SIZE) * VEC_SIZE
             ],
@@ -304,9 +319,9 @@ void dynamic_batching_decoding_cache_attention_fp16_kernel(
             memset(local_k, 0, sizeof(local_k));
         } else {
             const int64_t key_offset
-                            = (cache_offset_s + context_id) * cache_stride_s
-                            + layer_idx * cache_stride_l
-                            + kv_head_idx * cache_stride_h
+                            = (cache_offset_s + context_id) * token_stride
+                            + layer_idx * layer_stride
+                            + kv_head_idx * head_stride
                             + group_lane_id * VEC_SIZE;
             #pragma unroll
             for (int64_t i = 0; i < VEC_LEN; i++) {
@@ -319,11 +334,28 @@ void dynamic_batching_decoding_cache_attention_fp16_kernel(
             }
 
             #pragma unroll
+            for(int k = 0; k < VEC_SIZE * VEC_LEN; k++) {
+                local_k_quant[k] += 128;
+            }
+
+            #pragma unroll
             for (int64_t i = 0; i < VEC_LEN; i++) {
+                half result[8];
+                uint32_t*      h   = reinterpret_cast<uint32_t*>(result);
+                uint32_t const i8s = reinterpret_cast<uint32_t const&>(*(local_k_quant + i * VEC_SIZE));
+                asm volatile("prmt.b32 %0,%1,%2,%3;\n" : "=r"(h[0]) : "r"(i8s), "n"(start_byte_for_fp16), "n"(mask_for_elt_01));
+                asm volatile("prmt.b32 %0,%1,%2,%3;\n" : "=r"(h[1]) : "r"(i8s), "n"(start_byte_for_fp16), "n"(mask_for_elt_23));
+                asm volatile("sub.f16x2 %0, %1, %2;\n" : "=r"(h[0]) : "r"(h[0]), "r"(I8s_TO_F16s_MAGIC_NUM));
+                asm volatile("sub.f16x2 %0, %1, %2;\n" : "=r"(h[1]) : "r"(h[1]), "r"(I8s_TO_F16s_MAGIC_NUM));
+                uint32_t*      h_2   = reinterpret_cast<uint32_t*>(result+4);
+                uint32_t const i8s_2 = reinterpret_cast<uint32_t const&>(*(local_k_quant + i * VEC_SIZE + 4));
+                asm volatile("prmt.b32 %0,%1,%2,%3;\n" : "=r"(h_2[0]) : "r"(i8s_2), "n"(start_byte_for_fp16), "n"(mask_for_elt_01));
+                asm volatile("prmt.b32 %0,%1,%2,%3;\n" : "=r"(h_2[1]) : "r"(i8s_2), "n"(start_byte_for_fp16), "n"(mask_for_elt_23));
+                asm volatile("sub.f16x2 %0, %1, %2;\n" : "=r"(h_2[0]) : "r"(h_2[0]), "r"(I8s_TO_F16s_MAGIC_NUM));
+                asm volatile("sub.f16x2 %0, %1, %2;\n" : "=r"(h_2[1]) : "r"(h_2[1]), "r"(I8s_TO_F16s_MAGIC_NUM));
                 #pragma unroll
                 for (int64_t j = 0; j < VEC_SIZE; j++) {
-                    local_k[i * VEC_SIZE + j]
-                        = local_k_scale[i] * (half)local_k_quant[i * VEC_SIZE + j];
+                    local_k[i * VEC_SIZE + j] = local_k_scale[i] * result[j];
                 }
             }
         }
@@ -387,11 +419,11 @@ void dynamic_batching_decoding_cache_attention_fp16_kernel(
         // all thread groups within a warp must be launched together.
         if (context_id < context_len){
             const int64_t value_offset
-                            = (cache_offset_s + context_id) * cache_stride_s
-                            + layer_idx * cache_stride_l
-                            + kv_head_idx * cache_stride_h
+                            = (cache_offset_s + context_id) * token_stride
+                            + layer_idx * layer_stride
+                            + kv_head_idx * head_stride
                             + group_lane_id * VEC_SIZE
-                            + cache_stride_kv;
+                            + kv_stride;
             #pragma unroll
             for (int64_t i = 0; i < VEC_LEN; i++) {
                 // copy 128(16 * 8) bits from V to Local V
@@ -403,12 +435,28 @@ void dynamic_batching_decoding_cache_attention_fp16_kernel(
             }
 
             #pragma unroll
+            for(int k = 0; k < VEC_SIZE * VEC_LEN; k++) {
+                local_v_quant[k] += 128;
+            }
+
+            #pragma unroll
             for (int64_t i = 0; i < VEC_LEN; i++) {
+                half result[8];
+                uint32_t*      h   = reinterpret_cast<uint32_t*>(result);
+                uint32_t const i8s = reinterpret_cast<uint32_t const&>(*(local_v_quant + i * VEC_SIZE));
+                asm volatile("prmt.b32 %0,%1,%2,%3;\n" : "=r"(h[0]) : "r"(i8s), "n"(start_byte_for_fp16), "n"(mask_for_elt_01));
+                asm volatile("prmt.b32 %0,%1,%2,%3;\n" : "=r"(h[1]) : "r"(i8s), "n"(start_byte_for_fp16), "n"(mask_for_elt_23));
+                asm volatile("sub.f16x2 %0, %1, %2;\n" : "=r"(h[0]) : "r"(h[0]), "r"(I8s_TO_F16s_MAGIC_NUM));
+                asm volatile("sub.f16x2 %0, %1, %2;\n" : "=r"(h[1]) : "r"(h[1]), "r"(I8s_TO_F16s_MAGIC_NUM));
+                uint32_t*      h_2   = reinterpret_cast<uint32_t*>(result+4);
+                uint32_t const i8s_2 = reinterpret_cast<uint32_t const&>(*(local_v_quant + i * VEC_SIZE + 4));
+                asm volatile("prmt.b32 %0,%1,%2,%3;\n" : "=r"(h_2[0]) : "r"(i8s_2), "n"(start_byte_for_fp16), "n"(mask_for_elt_01));
+                asm volatile("prmt.b32 %0,%1,%2,%3;\n" : "=r"(h_2[1]) : "r"(i8s_2), "n"(start_byte_for_fp16), "n"(mask_for_elt_23));
+                asm volatile("sub.f16x2 %0, %1, %2;\n" : "=r"(h_2[0]) : "r"(h_2[0]), "r"(I8s_TO_F16s_MAGIC_NUM));
+                asm volatile("sub.f16x2 %0, %1, %2;\n" : "=r"(h_2[1]) : "r"(h_2[1]), "r"(I8s_TO_F16s_MAGIC_NUM));
                 #pragma unroll
                 for (int64_t j = 0; j < VEC_SIZE; j++) {
-                    local_v[i * VEC_SIZE + j] += (__half2float(local_v_scale[i])
-                                                * (float)local_v_quant[i * VEC_SIZE + j]
-                                                * logits[context_id]);
+                    local_v[i * VEC_SIZE + j] += __half2float(local_v_scale[i] * result[j]) * logits[context_id];
                 }
             }
         }
@@ -424,7 +472,6 @@ void dynamic_batching_decoding_cache_attention_fp16_kernel(
     //for now, every warp's each thread group got the partial result inside a warp 
     //we need to add up each warp's first thread group by reusing the logits smem
     __syncthreads();
-
     // do some reuse
     for (int64_t i = threadIdx.x; i < HEAD_SIZE; i += TPB){
         logits[i] = 0;
@@ -448,7 +495,7 @@ void dynamic_batching_decoding_cache_attention_fp16_kernel(
     __syncthreads();
 
     for (int64_t i = threadIdx.x; i < HEAD_SIZE; i += TPB){
-        output[batch_idx * output_stride_s + head_idx * HEAD_SIZE + i] = logits[i];
+        output[batch_idx * embed_stride + head_idx * HEAD_SIZE + i] = logits[i];
     }
 }
 
@@ -483,6 +530,7 @@ ppl::common::RetCode dynamic_batch_multi_head_cache_attention(
     const int64_t cache_stride_l,
     const int64_t cache_stride_h,
     const int64_t cache_stride_kv,
+    const int64_t max_token,
     void* cache, // int8 (S, L, 2, KVH, D), (L, KVH, S, 2, D)
     void* scale, // float16 (S, L, 2, KVH, D/8), (L, KVH, S, 2, D/8)
     const ppl::common::TensorShape* output_shape,
@@ -584,39 +632,35 @@ ppl::common::RetCode dynamic_batch_multi_head_cache_attention(
             const dim3 grid_size = {(unsigned int)num_heads, (unsigned int)decodeing_q_num, 1};
             switch (head_dim){
                 case 64:
-                    dynamic_batching_decoding_cache_attention_fp16_kernel<64, 4, 256, 8, true>
+                    dynamic_batching_decoding_cache_attention_fp16_kernel<64, 4, 256, 8, true, 0>
                     <<<grid_size, 256, logits_size, stream>>>
                     (
-                        (half*)(output), (half*)(query), attn_scale, layer_idx, kv_head_shift, kv_repeats,
-                        q_stride_s, o_stride_s, cache_stride_s, cache_stride_l, cache_stride_h, cache_stride_kv,
-                        (int8_t*)cache, (half*)scale, (int64_t*)cachestarts, (int64_t*)(kvstarts)
+                        (half*)(output), (half*)(query), attn_scale, layer_idx, num_layer, kv_head_shift, kv_repeats,
+                        max_token, (int8_t*)cache, (half*)scale, (int64_t*)cachestarts, (int64_t*)(kvstarts)
                     );
                     break;
                 case 96:
-                    dynamic_batching_decoding_cache_attention_fp16_kernel<96, 4, 256, 8, true>
+                    dynamic_batching_decoding_cache_attention_fp16_kernel<96, 4, 256, 8, true, 0>
                     <<<grid_size, 256, logits_size, stream>>>
                     (
-                        (half*)(output), (half*)(query), attn_scale, layer_idx, kv_head_shift, kv_repeats,
-                        q_stride_s, o_stride_s, cache_stride_s, cache_stride_l, cache_stride_h, cache_stride_kv,
-                        (int8_t*)cache, (half*)scale, (int64_t*)cachestarts, (int64_t*)(kvstarts)
+                        (half*)(output), (half*)(query), attn_scale, layer_idx, num_layer, kv_head_shift, kv_repeats,
+                        max_token, (int8_t*)cache, (half*)scale, (int64_t*)cachestarts, (int64_t*)(kvstarts)
                     );
                     break;
                 case 128:
-                    dynamic_batching_decoding_cache_attention_fp16_kernel<128, 8, 256, 8, true>
+                    dynamic_batching_decoding_cache_attention_fp16_kernel<128, 8, 256, 8, true, 0>
                     <<<grid_size, 256, logits_size, stream>>>
                     (
-                        (half*)(output), (half*)(query), attn_scale, layer_idx, kv_head_shift, kv_repeats,
-                        q_stride_s, o_stride_s, cache_stride_s, cache_stride_l, cache_stride_h, cache_stride_kv,
-                        (int8_t*)cache, (half*)scale, (int64_t*)cachestarts, (int64_t*)(kvstarts)
+                        (half*)(output), (half*)(query), attn_scale, layer_idx, num_layer, kv_head_shift, kv_repeats,
+                        max_token, (int8_t*)cache, (half*)scale, (int64_t*)cachestarts, (int64_t*)(kvstarts)
                     );
                     break;
                 case 256:
-                    dynamic_batching_decoding_cache_attention_fp16_kernel<256, 16, 256, 8, true>
+                    dynamic_batching_decoding_cache_attention_fp16_kernel<256, 16, 256, 8, true, 0>
                     <<<grid_size, 256, logits_size, stream>>>
                     (
-                        (half*)(output), (half*)(query), attn_scale, layer_idx, kv_head_shift, kv_repeats,
-                        q_stride_s, o_stride_s, cache_stride_s, cache_stride_l, cache_stride_h, cache_stride_kv,
-                        (int8_t*)cache, (half*)scale, (int64_t*)cachestarts, (int64_t*)(kvstarts)
+                        (half*)(output), (half*)(query), attn_scale, layer_idx, num_layer, kv_head_shift, kv_repeats,
+                        max_token, (int8_t*)cache, (half*)scale, (int64_t*)cachestarts, (int64_t*)(kvstarts)
                     );
                     break;
                 default:
