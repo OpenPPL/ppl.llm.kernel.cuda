@@ -329,7 +329,7 @@ void dynamic_batching_decoding_cache_attention_fp16_kernel(struct dynamic_batchi
             #pragma unroll
             for (int64_t i = 0; i < VEC_LEN; i++) {
                 #pragma unroll
-                for(int k = i * VEC_SIZE; k < (i + 1) * VEC_SIZE; k++) {
+                for(int64_t k = i * VEC_SIZE; k < (i + 1) * VEC_SIZE; k++) {
                     local_k_quant[k] += 128;
                 }
                 half result[8];
@@ -428,7 +428,7 @@ void dynamic_batching_decoding_cache_attention_fp16_kernel(struct dynamic_batchi
             #pragma unroll
             for (int64_t i = 0; i < VEC_LEN; i++) {
                 #pragma unroll
-                for(int k = i * VEC_SIZE; k < (i + 1) * VEC_SIZE; k++) {
+                for(int64_t k = i * VEC_SIZE; k < (i + 1) * VEC_SIZE; k++) {
                     local_v_quant[k] += 128;
                 }
                 half result[8];
