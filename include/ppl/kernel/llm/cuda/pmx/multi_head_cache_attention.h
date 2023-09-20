@@ -52,7 +52,6 @@ ppl::common::RetCode dynamic_batch_multi_head_cache_attention(
     const int64_t cache_stride_l,
     const int64_t cache_stride_h,
     const int64_t cache_stride_kv,
-    const int64_t max_token,
     void* cache, // int8 (S, L, 2, KVH, D), (L, KVH, S, 2, D)
     void* scale, // float16 (S, L, 2, KVH, D/8), (L, KVH, S, 2, D/8)
     const ppl::common::TensorShape* output_shape,
