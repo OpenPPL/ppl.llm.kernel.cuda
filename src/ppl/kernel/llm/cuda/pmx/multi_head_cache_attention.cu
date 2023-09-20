@@ -26,7 +26,7 @@
 
 namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pmx {
 
-struct decoding_cache_attention_param {
+struct dynamic_batching_decoding_cache_attention_kernel_param {
     half* query;
     half* output;
     int8_t* cache;
@@ -216,7 +216,7 @@ template<
     int32_t QUANT_GROUP,
     bool SHIFT_KV>
 __global__
-void dynamic_batching_decoding_cache_attention_fp16_kernel(struct decoding_cache_attention_param p)
+void dynamic_batching_decoding_cache_attention_fp16_kernel(struct dynamic_batching_decoding_cache_attention_kernel_param p)
 {
     /***
     * You have to remember that this Kernel was created by a brother on the night of July 20, 2023. On that day,
@@ -321,11 +321,6 @@ void dynamic_batching_decoding_cache_attention_fp16_kernel(struct decoding_cache
                 // copy 128(16 * 8) bits from K to Local K
                 const int64_t key_idx = key_offset + i * THREAD_GROUP_SIZE * VEC_SIZE;
                 copy<sizeof(int8_t) * VEC_SIZE>(&p.cache[key_idx],  &local_k_quant[i * VEC_SIZE]);
-                #pragma unroll
-                for(int k = i * VEC_SIZE; k < (i + 1) * VEC_SIZE; k++) {
-                    local_k_quant[k] += 128;
-                }
-
                 const int64_t key_scale_idx = key_idx >> QUANT_GROUP_SHIFT;
                 local_k_scale[i] = p.scale[key_scale_idx];
             }
@@ -333,6 +328,10 @@ void dynamic_batching_decoding_cache_attention_fp16_kernel(struct decoding_cache
 
             #pragma unroll
             for (int64_t i = 0; i < VEC_LEN; i++) {
+                #pragma unroll
+                for(int k = i * VEC_SIZE; k < (i + 1) * VEC_SIZE; k++) {
+                    local_k_quant[k] += 128;
+                }
                 half result[8];
                 uint32_t*      h   = reinterpret_cast<uint32_t*>(result);
                 uint32_t const i8s = reinterpret_cast<uint32_t const&>(*(local_k_quant + i * VEC_SIZE));
@@ -422,17 +421,16 @@ void dynamic_batching_decoding_cache_attention_fp16_kernel(struct decoding_cache
                 // copy 128(16 * 8) bits from V to Local V
                 const int64_t value_idx = value_offset + i * THREAD_GROUP_SIZE * VEC_SIZE;
                 copy<sizeof(int8_t) * VEC_SIZE>(&p.cache[value_idx],  &local_v_quant[i * VEC_SIZE]);
-                #pragma unroll
-                for(int k = i * VEC_SIZE; k < (i + 1) * VEC_SIZE; k++) {
-                    local_v_quant[k] += 128;
-                }
-
                 const int64_t value_scale_idx = value_idx >> QUANT_GROUP_SHIFT;
                 local_v_scale[i] = p.scale[value_scale_idx];
             }
 
             #pragma unroll
             for (int64_t i = 0; i < VEC_LEN; i++) {
+                #pragma unroll
+                for(int k = i * VEC_SIZE; k < (i + 1) * VEC_SIZE; k++) {
+                    local_v_quant[k] += 128;
+                }
                 half result[8];
                 uint32_t*      h   = reinterpret_cast<uint32_t*>(result);
                 uint32_t const i8s = reinterpret_cast<uint32_t const&>(*(local_v_quant + i * VEC_SIZE));
@@ -582,7 +580,7 @@ ppl::common::RetCode dynamic_batch_multi_head_cache_attention(
     const int64_t v_stride_s = current_value_shape->GetDim(1) * head_dim;
     const int64_t o_stride_s = output_shape->GetDim(1) * head_dim;
 
-    struct decoding_cache_attention_param p;
+    struct dynamic_batching_decoding_cache_attention_kernel_param p;
     p.query = (half*)query;
     p.output = (half*)output;
     p.cache = (int8_t*)cache;
