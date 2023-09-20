@@ -17,7 +17,10 @@
 
 # include "ppl/kernel/llm/cuda/quant/common.h"
 # include "ppl/kernel/llm/cuda/quant/i8/rmsnorm.h"
+# include "ppl/kernel/llm/cuda/quant/layout.h"
 # include "ppl/common/log.h"
+
+using namespace ppl::kernel::llm::cuda::quant;
 
 /**
  * Skip Rmsnorm 与 动态量化 的融合算子
@@ -31,7 +34,7 @@
  *              而后执行 y2 = rmsnorm(y1)
  * 返回 y1, y2 作为输出
  */
- template <int VPT, int TPB>
+template <int VPT, int TPB, bool ConvertRowMajorToCol32>
 __global__
 void _skip_rmsnorm_with_minmax_quant_fp16i_int8o(
   const fp16_t *x,                // 输入，形如 [batch, hidden dim]
@@ -90,7 +93,23 @@ void _skip_rmsnorm_with_minmax_quant_fp16i_int8o(
     fp32_t fp32_value = __half2float(inLocal[it]) * __half2float(weightLocal[it]);
     outLocal[it] = QUANT_FP32_TO_INT8_RCP(fp32_value, r_reduced);
   }
-  copy<sizeof(int8_t) * VPT>(outLocal, &o2[idx]);
+
+  // convert layout
+  if (ConvertRowMajorToCol32)
+  {
+    // convert data layout from rowmajor to col32
+    // col32 layout is necessary for int8 gemm
+    // check here: https://blog.speechmatics.com/gpu-quantisation
+    const int32_t num_of_row = blockDim.x;
+    const int32_t num_of_col = normalize_shape;
+    idx = layout::LayoutConverter(
+      num_of_row, num_of_col).RowMajorToCol32(idx);
+    copy<sizeof(int8_t) * VPT>(outLocal, &o2[idx]);
+  }
+  else 
+  {
+    copy<sizeof(int8_t) * VPT>(outLocal, &o2[idx]);
+  }
 };
 
 
@@ -106,6 +125,7 @@ void _skip_rmsnorm_with_minmax_quant_fp16i_int8o(
  *              而后执行 y2 = rmsnorm(y1)
  * 返回 y1, y2 作为输出
  */
+template<bool ConvertRowMajorToCol32>
 ppl::common::RetCode skip_rmsnorm_with_minmax_quant_fp16i_int8o(
   const cudaStream_t stream,
   const fp16_t *x,                // 输入，形如 [batch, hidden dim]
@@ -127,7 +147,7 @@ ppl::common::RetCode skip_rmsnorm_with_minmax_quant_fp16i_int8o(
   switch (normalize_shape)
   {
   case 768:
-    _skip_rmsnorm_with_minmax_quant_fp16i_int8o<VPT, 768 / VPT>
+    _skip_rmsnorm_with_minmax_quant_fp16i_int8o<VPT, 768 / VPT, ConvertRowMajorToCol32>
     <<<grid_size, 768 / VPT, 0, stream>>>(
       x,
       weight,
@@ -140,7 +160,7 @@ ppl::common::RetCode skip_rmsnorm_with_minmax_quant_fp16i_int8o(
     );
     break;
   case 1024:
-    _skip_rmsnorm_with_minmax_quant_fp16i_int8o<VPT, 1024 / VPT>
+    _skip_rmsnorm_with_minmax_quant_fp16i_int8o<VPT, 1024 / VPT, ConvertRowMajorToCol32>
     <<<grid_size, 1024 / VPT, 0, stream>>>(
       x,
       weight,
@@ -153,7 +173,7 @@ ppl::common::RetCode skip_rmsnorm_with_minmax_quant_fp16i_int8o(
     );
     break;
   case 4096:
-    _skip_rmsnorm_with_minmax_quant_fp16i_int8o<VPT, 4096 / VPT>
+    _skip_rmsnorm_with_minmax_quant_fp16i_int8o<VPT, 4096 / VPT, ConvertRowMajorToCol32>
     <<<grid_size, 4096 / VPT, 0, stream>>>(
       x,
       weight,
@@ -166,7 +186,7 @@ ppl::common::RetCode skip_rmsnorm_with_minmax_quant_fp16i_int8o(
     );
     break;
   case 8192:
-    _skip_rmsnorm_with_minmax_quant_fp16i_int8o<VPT, 8192 / VPT>
+    _skip_rmsnorm_with_minmax_quant_fp16i_int8o<VPT, 8192 / VPT, ConvertRowMajorToCol32>
     <<<grid_size, 8192 / VPT, 0, stream>>>(
       x,
       weight,

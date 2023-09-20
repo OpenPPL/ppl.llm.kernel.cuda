@@ -34,6 +34,7 @@ namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace qu
  *              而后执行 y2 = rmsnorm(y1)
  * 返回 y1, y2 作为输出
  */
+template<bool ConvertRowMajorToCol32>
 ppl::common::RetCode skip_rmsnorm_with_minmax_quant_fp16i_int8o(
   const cudaStream_t stream,
   const fp16_t *x,                // 输入，形如 [batch, hidden dim]

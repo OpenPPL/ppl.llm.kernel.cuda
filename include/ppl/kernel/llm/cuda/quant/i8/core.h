@@ -111,6 +111,7 @@ _tokenwise_minmax_quantize_fp16i_i8o 用于执行 tokenwise 的矩阵量化
 _channelwise_minmax_quantize_fp16i_i8o 与 _tokenwise_minmax_quantize_fp16i_i8o 的区别其实就是一个沿着第一维统计量化，另一个沿着最后一维统计量化。
     channelwise, tokenwise 这样的命名方式更符合量化领域的规范
 */
+template<bool ConvertRowMajorToCol32>
 ppl::common::RetCode tokenwise_minmax_quantize_fp16i_i8o(
     cudaStream_t stream,
     const fp16_t *input, // [num of tokens, hidden dim]
@@ -132,6 +133,7 @@ token_channel_dequantize_i32i_f16o 用于执行 token + channel 的双重解量�
     该函数将执行 output[i][j] = input[i][j] * scale_per_token[i] * scale_per_channel[j] 进行解量化
     该函数在 batch 大约为 512 时可以打满访存带宽，好像 batch 大了反而菜一些
 */
+template<bool ConvertCol32ToRowMajor>
 ppl::common::RetCode token_channel_dequantize_i32i_f16o(
     cudaStream_t stream,
     int32_t *input,    // [num_of_token, hidden_dim] or [M, N]

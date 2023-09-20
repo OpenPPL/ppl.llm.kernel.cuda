@@ -18,6 +18,7 @@
 # ifndef __PPL_KERNEL_LLM_CUDA_QUANT_H__
 # define __PPL_KERNEL_LLM_CUDA_QUANT_H__
 
+# define __HOST_DEVICE_FUNCTION__ __host__ __device__
 # include "ppl/kernel/llm/cuda/common/general_include.h"
 # include <cuda_fp16.h>
 
@@ -57,14 +58,14 @@ constexpr int32_t INT8_QMIN = -127;          // 量化最小值，改了就等�
 constexpr int32_t INT8_QMAX = +127;          // 量化最小值，改了就等着起飞
 
 template<typename Dtype>
-__device__ inline
+__HOST_DEVICE_FUNCTION__ inline
 Dtype CLIP(const Dtype v, const Dtype min, const Dtype max){
     if(v > max) return max;
     if(v < min) return min;
     return v;
 }
 
-__device__ inline
+__HOST_DEVICE_FUNCTION__ inline
 int _round2int(
     const float value,
     const int rounding
@@ -98,7 +99,7 @@ union FPConvertHelper {
 };
 
 template<typename Dtype, typename Stype, typename Otype>
-__device__ inline
+__HOST_DEVICE_FUNCTION__ inline
 float QuantizeScalarFloating(
     const Dtype value, const Stype scale, const Otype offset,
     const int exponent, const int mantissa,
@@ -176,7 +177,7 @@ float QuantizeScalarFloating(
 根据 scale 把 fp32 的数量化到 int8，这个东西似乎可以调用一个 __saturatef 指令加速运算，虽然它现在还没有
 https://github.com/openppl-public/ppq/blob/master/ppq/csrc/cuda/common.cuh#L118
 */
-__device__ inline
+__HOST_DEVICE_FUNCTION__ inline
 int8_t QUANT_FP32_TO_INT8(const fp32_t value, const fp32_t scale) {
     fp32_t _f_value = value / scale;
     int32_t _i_value = CLIP<int32_t>(
@@ -190,7 +191,7 @@ int8_t QUANT_FP32_TO_INT8(const fp32_t value, const fp32_t scale) {
 根据 scale的倒数 把 fp32 的数量化到 int8，这个东西似乎可以调用一个 __saturatef 指令加速运算，虽然它现在还没有
 https://github.com/openppl-public/ppq/blob/master/ppq/csrc/cuda/common.cuh#L118
 */
-__device__ inline
+__HOST_DEVICE_FUNCTION__ inline
 int8_t QUANT_FP32_TO_INT8_RCP(const fp32_t value, const fp32_t r_scale) {
     fp32_t _f_value = value * r_scale;
     int32_t _i_value = CLIP<int32_t>(
@@ -204,14 +205,14 @@ int8_t QUANT_FP32_TO_INT8_RCP(const fp32_t value, const fp32_t r_scale) {
 根据 min-max 范围确定 scale，这玩意跟 ppq 里面的实现很像，但它更简单一些
 https://github.com/openppl-public/ppq/blob/master/ppq/quantization/observer/range.py#L23
 */
-__device__ inline
+__HOST_DEVICE_FUNCTION__ inline
 fp32_t MIN_MAX_RANGE_TO_SCALE(const fp32_t range){
     assert(range > 0);
-    return max(min_max / 127, MINIMUM_QUANT_SCALE);
+    return max(range / 127, MINIMUM_QUANT_SCALE);
 }
 
 /* 快速求倒数，调一条原生指令 */
-__device__ inline
+__HOST_DEVICE_FUNCTION__ inline
 fp32_t RCP(const fp32_t value){
     return __frcp_rz(value);
 }
