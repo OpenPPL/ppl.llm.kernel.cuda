@@ -19,6 +19,7 @@
 # define __PPL_KERNEL_LLM_CUDA_QUANT_H__
 
 # define __HOST_DEVICE_FUNCTION__ __host__ __device__
+# define __DEVICE_INLINE_FUNCTION__ inline __device__   
 # include "ppl/kernel/llm/cuda/common/general_include.h"
 # include <cuda_fp16.h>
 
@@ -215,6 +216,36 @@ fp32_t MIN_MAX_RANGE_TO_SCALE(const fp32_t range){
 __HOST_DEVICE_FUNCTION__ inline
 fp32_t RCP(const fp32_t value){
     return __frcp_rz(value);
+}
+
+/* 一个临时工函数，用来求 block 中的最大值 */
+template<int32_t WPT>
+__DEVICE_INLINE_FUNCTION__
+fp32_t __BlockReduceMax(fp32_t reducing, fp32_t *shared_mem){
+    // Helper function for reduce softmax qkmax.
+    constexpr int32_t WARP_SIZE = 32;
+    const int32_t lane_id = threadIdx.x % WARP_SIZE;
+    const int32_t warp_id = threadIdx.x / WARP_SIZE;
+
+    for (int mask = WARP_SIZE / 2; mask >= 1; mask /= 2) {
+        reducing = fmaxf(reducing, __shfl_xor_sync(uint32_t(-1), reducing, mask));
+    }
+
+    if (lane_id == 0) {
+        shared_mem[warp_id] = reducing;
+    }
+    __syncthreads();
+
+    if (lane_id < WPT) reducing = shared_mem[lane_id];
+    else reducing = -FLT_MAX;
+
+# pragma unroll
+    for (int mask = WPT / 2; mask >= 1; mask /= 2) {
+        reducing = fmaxf(reducing, __shfl_xor_sync(uint32_t(-1), reducing, mask));
+    }
+
+    reducing = __shfl_sync(uint32_t(-1), reducing, 0);
+    return reducing;
 }
 
 }}}}}

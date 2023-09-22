@@ -15,12 +15,12 @@
 // specific language governing permissions and limitations
 // under the License.
 
-# include "ppl/kernel/llm/cuda/quant/common.h"
 # include "ppl/kernel/llm/cuda/quant/i8/rmsnorm.h"
-# include "ppl/kernel/llm/cuda/quant/layout.h"
 # include "ppl/common/log.h"
 
 using namespace ppl::kernel::llm::cuda::quant;
+
+namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace quant { namespace i8 {
 
 /**
  * Skip Rmsnorm 与 动态量化 的融合算子
@@ -205,3 +205,5 @@ ppl::common::RetCode skip_rmsnorm_with_minmax_quant_fp16i_int8o(
   };
   return ppl::common::RC_SUCCESS;
 }
+
+}}}}}}

@@ -25,11 +25,23 @@ namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace qu
 
 // By ChatGPT
 
+struct MatrixCoord{
+    using index_t = int32_t;
+    index_t row_id;
+    index_t col_id;
+
+    MatrixCoord() = delete;
+    MatrixCoord(index_t row_id, index_t col_id): 
+        row_id(row_id), col_id(col_id) {
+        // constructor
+    }
+}
+
 /*
     Layout Helper that convert row major index to col32 index.
 */
 struct LayoutConverter {
-    using index_t = int;
+    using index_t = unsigned int;
     index_t num_of_row; // num of row of given matrix.
     index_t num_of_col; // num of col of given matrix.
 
@@ -83,8 +95,28 @@ struct LayoutConverter {
         index_t internal_id = col_block_id - col_block_id * COL32;
         return col_block_id * num_of_row * COL32 + row * COL32 + internal_id;
     }
+
+    const __HOST_DEVICE_FUNCTION__
+    inline MatrixCoord Col32ToRowMajorCoord(
+        const index_t row, const index_t col){
+        constexpr index_t COL32 = 32;
+        assert (row < num_of_row);
+        assert (col < num_of_col);
+
+        index_t col_block_id = col / COL32;
+        index_t internal_id = col_block_id - col_block_id * COL32;
+        index_t row_major_offset = col_block_id * num_of_row * COL32 + row * COL32 + internal_id;
+        return MatrixCoord(row_major_offset / num_of_col, row_major_offset % num_of_col);
+    }
+
+    const __HOST_DEVICE_FUNCTION__
+    inline MatrixCoord Col32ToRowMajorCoord(
+        const index_t offset){
+        assert (offset < num_of_col * num_of_col);
+        return Col32ToRowMajorCoord(offset / num_of_col, offset % num_of_col);
+    }
 };
 
-}}}}
+}}}}}
 
 # endif

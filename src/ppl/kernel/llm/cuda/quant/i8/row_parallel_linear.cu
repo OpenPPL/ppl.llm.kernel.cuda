@@ -20,7 +20,7 @@
 
 # include <cuda_fp16.h>
 
-namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pmx {
+namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace quant { namespace i8 {
 
 ppl::common::RetCode row_parallel_linear_int8i_int32o(
     const cudaStream_t stream,
@@ -96,4 +96,4 @@ ppl::common::RetCode row_parallel_linear_int8i_int32o(
     return ppl::common::RC_SUCCESS;
 }
 
-}}}}}
+}}}}}}

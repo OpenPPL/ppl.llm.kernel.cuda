@@ -20,6 +20,7 @@
 
 # include "ppl/kernel/llm/cuda/common/general_include.h"
 # include "ppl/kernel/llm/cuda/quant/common.h"
+# include "ppl/kernel/llm/cuda/quant/layout.h"
 
 namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace quant { namespace i8 {
 

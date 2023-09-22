@@ -15,9 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-# include "ppl/kernel/llm/cuda/quant/common.h"
 # include "ppl/kernel/llm/cuda/quant/core.h"
-# include "ppl/kernel/llm/cuda/quant/layout.h"
 # include "ppl/common/log.h"
 
 using namespace ppl::kernel::llm::cuda::quant;
@@ -36,36 +34,6 @@ namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace qu
         token_channel_dequantize_i32i_f16o - token-channel 双重解量化，int32 输入， fp16 输出
         groupwise_minmax_dequantize_int8i_fp16o - 动态分组解量化，int8 输入，fp16 输出
 */
-
-/* Helper Function */
-template<int32_t WPT>
-__device__ inline
-fp32_t __BlockReduceMax(fp32_t reducing, fp32_t *shared_mem){
-    // Helper function for reduce softmax qkmax.
-    constexpr int32_t WARP_SIZE = 32;
-    const int32_t lane_id = threadIdx.x % WARP_SIZE;
-    const int32_t warp_id = threadIdx.x / WARP_SIZE;
-
-    for (int mask = WARP_SIZE / 2; mask >= 1; mask /= 2) {
-        reducing = fmaxf(reducing, __shfl_xor_sync(uint32_t(-1), reducing, mask));
-    }
-
-    if (lane_id == 0) {
-        shared_mem[warp_id] = reducing;
-    }
-    __syncthreads();
-
-    if (lane_id < WPT) reducing = shared_mem[lane_id];
-    else reducing = -FLT_MAX;
-
-# pragma unroll
-    for (int mask = WPT / 2; mask >= 1; mask /= 2) {
-        reducing = fmaxf(reducing, __shfl_xor_sync(uint32_t(-1), reducing, mask));
-    }
-
-    reducing = __shfl_sync(uint32_t(-1), reducing, 0);
-    return reducing;
-}
 
 /*
 The function performs group-wise dynamic quantization, 
@@ -285,27 +253,37 @@ void _token_channel_dequantize_i32i_f16o(
     const fp16_t *scale_per_channel,
     fp16_t *out
 ) {
-    const int32_t batch_id = blockIdx.y;
+    const int32_t batch_id     = blockIdx.y;
     const int32_t batch_offset = batch_id * hidden_dim;
-    const int32_t tile_id  = blockIdx.x;
-    const int32_t tile_offset = tile_id * TPB * VPT;
+    const int32_t tile_id      = blockIdx.x;
+    const int32_t tile_offset  = tile_id * TPB * VPT;
 
     int32_t local_in[VPT]; fp16_t local_w[VPT];
     int32_t input_index = batch_offset + tile_offset + threadIdx.x * VPT;
-    if (ConvertCol32ToRowMajor){
-        input_index = LayoutConverter(
-            num_of_row, num_of_col).Col32ToRowMajor(input_index);
+
+    if (input_index < hidden_dim) {
+
+        if (ConvertCol32ToRowMajor){
+            input_index = LayoutConverter(
+                num_of_row, num_of_col).Col32ToRowMajor(input_index);
+        }
+        copy<sizeof(int32_t) * VPT>(
+            &in[input_index], local_in);
+        copy<sizeof(fp16_t) * VPT>(
+            &scale_per_channel[tile_offset + threadIdx.x * VPT], local_w);
+        
+        fp32_t batch_scale = __half2float(scale_per_batch[batch_id]);
+        fp16_t local_out[VPT];
+        
+        # pragma unroll
+        for(int32_t i = 0; i < VPT; i++){
+            local_out[i] = __float2half(
+                local_in[i] * __half2float(local_w[i]) * batch_scale);
+        }
+
+        copy<sizeof(fp16_t) * VPT>(
+            local_out, &out[batch_offset + tile_offset + threadIdx.x * VPT]);
     }
-    copy<sizeof(int32_t) * VPT>(&in[input_index], local_in);
-    copy<sizeof(fp16_t) * VPT>(&scale_per_channel[tile_offset + threadIdx.x * VPT], local_w);
-    
-    fp32_t batch_scale = __half2float(scale_per_batch[batch_id]);
-    fp16_t local_out[VPT];
-    # pragma unroll
-    for(int32_t i = 0; i < VPT; i++){
-        local_out[i] = __float2half(local_in[i] * __half2float(local_w[i]) * batch_scale);
-    }
-    copy<sizeof(fp16_t) * VPT>(local_out, &out[batch_offset + tile_offset + threadIdx.x * VPT]);
     
 }
 
