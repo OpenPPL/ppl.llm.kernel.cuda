@@ -35,7 +35,7 @@ struct MatrixCoord{
         row_id(row_id), col_id(col_id) {
         // constructor
     }
-}
+};
 
 /*
     Layout Helper that convert row major index to col32 index.
@@ -53,13 +53,13 @@ struct LayoutConverter {
         // constructor
     };
 
-    const __HOST_DEVICE_FUNCTION__
+    __HOST_DEVICE_FUNCTION__
     inline index_t RowColToOffset(
         const index_t row, const index_t col){
         return row * num_of_col + col;
     }
 
-    const __HOST_DEVICE_FUNCTION__
+    __HOST_DEVICE_FUNCTION__
     inline index_t RowMajorToCol32(const index_t offset){
         assert (offset < num_of_col * num_of_col);
         constexpr index_t COL32 = 32;
@@ -69,7 +69,7 @@ struct LayoutConverter {
         return RowColToOffset(row, col);
     }
 
-    const __HOST_DEVICE_FUNCTION__
+    __HOST_DEVICE_FUNCTION__
     inline index_t RowMajorToCol32(
         const index_t row, const index_t col){
         assert (row < num_of_row);
@@ -77,14 +77,14 @@ struct LayoutConverter {
         return RowMajorToCol32(RowColToOffset(row, col));
     }
 
-    const __HOST_DEVICE_FUNCTION__
+    __HOST_DEVICE_FUNCTION__
     inline index_t Col32ToRowMajor(
         const index_t offset){
         assert (offset < num_of_col * num_of_col);
         return Col32ToRowMajor(offset / num_of_col, offset % num_of_col);
     }
 
-    const __HOST_DEVICE_FUNCTION__
+    __HOST_DEVICE_FUNCTION__
     inline index_t Col32ToRowMajor(
         const index_t row, const index_t col){
         constexpr index_t COL32 = 32;
@@ -96,7 +96,7 @@ struct LayoutConverter {
         return col_block_id * num_of_row * COL32 + row * COL32 + internal_id;
     }
 
-    const __HOST_DEVICE_FUNCTION__
+    __HOST_DEVICE_FUNCTION__
     inline MatrixCoord Col32ToRowMajorCoord(
         const index_t row, const index_t col){
         constexpr index_t COL32 = 32;
@@ -109,7 +109,7 @@ struct LayoutConverter {
         return MatrixCoord(row_major_offset / num_of_col, row_major_offset % num_of_col);
     }
 
-    const __HOST_DEVICE_FUNCTION__
+    __HOST_DEVICE_FUNCTION__
     inline MatrixCoord Col32ToRowMajorCoord(
         const index_t offset){
         assert (offset < num_of_col * num_of_col);
