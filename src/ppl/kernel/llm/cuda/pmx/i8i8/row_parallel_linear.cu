@@ -48,6 +48,7 @@ ppl::common::RetCode row_parallel_linear(
     void* quant_buffer,
     const int64_t cublas_workspace_size,
     void* cublas_workspace,
+    ppl::kernel::llm::cuda::cublas::cublaslt_algo_cache_t* cublas_algo_cache,
     const ppl::common::TensorShape* output_shape,
     void* output)
 {
@@ -88,6 +89,7 @@ ppl::common::RetCode row_parallel_linear(
     //     0,
     //     cublas_workspace_size,
     //     cublas_workspace,
+    //     cublas_algo_cache,
     //     N,
     //     ppl::common::DATATYPE_INT32,
     //     quant_buffer);

@@ -167,6 +167,7 @@ ppl::common::RetCode gemm_i8i8i32(
     const int32_t beta, // int32-C need
     const int64_t workspace_size,
     void* workspace,
+    cublaslt_algo_cache_t* algo_cache,
     const int64_t ldc, // N
     const ppl::common::datatype_t typec, // int32
     void* C) // int32
@@ -225,6 +226,50 @@ ppl::common::RetCode gemm_i8i8i32(
     CUBLAS_CHECK_RC(cublasLtMatrixLayoutCreate(&Bdesc, abType, cublas_transb == CUBLAS_OP_N ? N : K, cublas_transb == CUBLAS_OP_N ? K : N, ldb));
     CUBLAS_CHECK_RC(cublasLtMatrixLayoutCreate(&Cdesc, cType, N, M, ldc));
 
+    cublaslt_algo_cache_idx_t cache_idx{
+        operationDesc,
+        {create_cublas_matrix_layout(Bdesc),
+        create_cublas_matrix_layout(Adesc),
+        create_cublas_matrix_layout(Cdesc),
+        create_cublas_matrix_layout(Cdesc)}};
+
+    // find algo online
+    cublasLtMatmulAlgo_t algo_value;
+    bool                 found_algo = false;
+    if (algo == nullptr) {
+        auto algo_cache_it = algo_cache->find(cache_idx);
+        if (algo_cache_it == algo_cache->end()) {
+            auto result =
+                cublaslt_find_best_algo(
+                    stream,
+                    cublaslt_handle,
+                    operationDesc,
+                    (const void*)(&alpha),
+                    B,
+                    Bdesc,
+                    A,
+                    Adesc,
+                    (const void*)(&beta),
+                    C,
+                    Cdesc,
+                    C,
+                    Cdesc,
+                    workspace_size,
+                    workspace);
+            if (result.first == ppl::common::RC_SUCCESS) {
+                algo_cache->emplace(cache_idx, result.second);
+                algo_value = result.second;
+                found_algo = true;
+            } else {
+                LOG(ERROR) << "cublas find algo failed, (M,N,K) = (" << M << "," << N << "," << K <<")";
+                return result.first;
+            }
+        } else {
+            algo_value = algo_cache_it->second;
+            found_algo = true;
+        }
+    }
+
     CUBLAS_CHECK_RC(cublasLtMatmul(
         cublaslt_handle,
         operationDesc,
@@ -238,7 +283,7 @@ ppl::common::RetCode gemm_i8i8i32(
         Cdesc,
         C,
         Cdesc,
-        algo,
+        found_algo ? &algo_value : algo,
         workspace,
         workspace_size,
         stream));
@@ -336,7 +381,7 @@ ppl::common::RetCode gemm_i8i8i32_col32(
         }
         int swizzle         = 0;
         int customOption    = 0;
-        int tile            = 20;
+        int tile            = CUBLASLT_MATMUL_TILE_128x128;
         int splitK_val      = 0;
         int reductionScheme = 0;
         CUBLAS_CHECK_RC(cublasLtMatmulAlgoInit(
@@ -351,10 +396,10 @@ ppl::common::RetCode gemm_i8i8i32_col32(
 #if (CUDART_VERSION >= 11000)
         int stages;
         if (use_4r4_kernel) {
-            stages = 15;
+            stages = CUBLASLT_MATMUL_STAGES_64x3;
         }
         else {
-            stages = 13;
+            stages = CUBLASLT_MATMUL_STAGES_64x1;
         }
         CUBLAS_CHECK_RC(cublasLtMatmulAlgoConfigSetAttribute(&algo, CUBLASLT_ALGO_CONFIG_STAGES_ID, &(stages), sizeof(stages)));
 #endif
