@@ -20,6 +20,7 @@
 #include "ppl/common/log.h"
 
 #include <algorithm>
+#include <map>
 
 namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace cublas {
 
