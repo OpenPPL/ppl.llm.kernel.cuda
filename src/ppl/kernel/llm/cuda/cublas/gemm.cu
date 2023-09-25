@@ -234,6 +234,7 @@ ppl::common::RetCode gemm_i8i8i32(
         create_cublas_matrix_layout(Cdesc)}};
 
     // find algo online
+    // TODO: why it will crash when M is not an even number?
     cublasLtMatmulAlgo_t algo_value;
     bool                 found_algo = false;
     if (algo == nullptr) {
