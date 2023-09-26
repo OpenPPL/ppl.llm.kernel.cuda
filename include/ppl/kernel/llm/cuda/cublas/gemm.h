@@ -15,10 +15,12 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef __PPL_KERNEL_LLM_CUDA_PMX_CUBLAS_MATMUL_H__
-#define __PPL_KERNEL_LLM_CUDA_PMX_CUBLAS_MATMUL_H__
+#ifndef __PPL_KERNEL_LLM_CUDA_PMX_CUBLAS_GEMM_H__
+#define __PPL_KERNEL_LLM_CUDA_PMX_CUBLAS_GEMM_H__
 
 #include "ppl/kernel/llm/cuda/common/general_include.h"
+
+#include "gemm_algo.h"
 
 #include "ppl/common/types.h"
 
@@ -50,6 +52,42 @@ ppl::common::RetCode gemm(
     const int64_t ldc,
     const ppl::common::datatype_t typec,
     void* C);
+
+ppl::common::RetCode gemm_i8i8i32(
+    const cudaStream_t stream,
+    const cublasLtHandle_t& cublaslt_handle,
+    const cublasLtMatmulAlgo_t* algo,
+    const bool transa, // must be false
+    const int64_t lda, // transa ? M : K;
+    const ppl::common::datatype_t typea, // int8
+    const void* A, // int8
+    const bool transb, // must be true
+    const int64_t ldb, // transb ? K : N;
+    const ppl::common::datatype_t typeb, // int8
+    const void* B, // int8
+    const void* bias, // int32
+    const int64_t M,
+    const int64_t N,
+    const int64_t K,
+    const int32_t alpha, // int32-C need
+    const int32_t beta, // int32-C need
+    const int64_t workspace_size,
+    void* workspace,
+    cublaslt_algo_cache_t* algo_cache,
+    const int64_t ldc, // N
+    const ppl::common::datatype_t typec, // int32
+    void* C); // int32
+
+ppl::common::RetCode gemm_i8i8i32_col32(
+    const cudaStream_t stream,
+    const cublasLtHandle_t& cublaslt_handle,
+    const void* input_col32, // int8
+    const void* kernel, // int8
+    const int64_t M,
+    const int64_t N,
+    const int64_t K,
+    const bool use_4r4_kernel,
+    void* output_col32); // int32
 
 }}}}}
 

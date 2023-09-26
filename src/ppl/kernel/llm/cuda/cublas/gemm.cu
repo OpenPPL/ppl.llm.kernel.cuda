@@ -79,8 +79,10 @@ ppl::common::RetCode gemm(
         return ppl::common::RC_UNSUPPORTED;
     }
 
-    cublasLtMatmulDesc_t operationDesc = nullptr;
-    cublasLtMatrixLayout_t Adesc = nullptr, Bdesc = nullptr, Cdesc = nullptr;
+    cublasLtMatmulDescOpaque_t OODesc{0};
+    cublasLtMatmulDesc_t operationDesc = &OODesc;
+    cublasLtMatrixLayoutOpaque_t AODesc{0}, BODesc{0}, CODesc{0};
+    cublasLtMatrixLayout_t Adesc = &AODesc, Bdesc = &BODesc, Cdesc = &CODesc;
 
     cublasOperation_t cublas_transa = transa == true ? CUBLAS_OP_T : CUBLAS_OP_N;
     cublasOperation_t cublas_transb = transb == true ? CUBLAS_OP_T : CUBLAS_OP_N;
@@ -88,10 +90,10 @@ ppl::common::RetCode gemm(
 
 #if (CUDART_VERSION >= 11000)
     cublasComputeType_t computeType = CUBLAS_COMPUTE_32F;
-    CUBLAS_CHECK_RC(cublasLtMatmulDescCreate(&operationDesc, computeType, scaleType));
+    CUBLAS_CHECK_RC(cublasLtMatmulDescInit(operationDesc, computeType, scaleType));
 #else
     cudaDataType_t computeType = scaleType;
-    CUBLAS_CHECK_RC(cublasLtMatmulDescCreate(&operationDesc, computeType));
+    CUBLAS_CHECK_RC(cublasLtMatmulDescInit(operationDesc, computeType));
 #endif
 
     // exchange A & B to col-major
@@ -106,9 +108,9 @@ ppl::common::RetCode gemm(
     }
 #endif
     // create matrix descriptors, we are good with the details here so no need to set any extra attributes
-    CUBLAS_CHECK_RC(cublasLtMatrixLayoutCreate(&Adesc, scaleType, cublas_transa == CUBLAS_OP_N ? K : M, cublas_transa == CUBLAS_OP_N ? M : K, lda));
-    CUBLAS_CHECK_RC(cublasLtMatrixLayoutCreate(&Bdesc, scaleType, cublas_transb == CUBLAS_OP_N ? N : K, cublas_transb == CUBLAS_OP_N ? K : N, ldb));
-    CUBLAS_CHECK_RC(cublasLtMatrixLayoutCreate(&Cdesc, scaleType, N, M, ldc));
+    CUBLAS_CHECK_RC(cublasLtMatrixLayoutInit(Adesc, scaleType, cublas_transa == CUBLAS_OP_N ? K : M, cublas_transa == CUBLAS_OP_N ? M : K, lda));
+    CUBLAS_CHECK_RC(cublasLtMatrixLayoutInit(Bdesc, scaleType, cublas_transb == CUBLAS_OP_N ? N : K, cublas_transb == CUBLAS_OP_N ? K : N, ldb));
+    CUBLAS_CHECK_RC(cublasLtMatrixLayoutInit(Cdesc, scaleType, N, M, ldc));
 
     CUBLAS_CHECK_RC(cublasLtMatmul(
         cublaslt_handle,
@@ -137,17 +139,11 @@ ppl::common::RetCode gemm(
         cublas_gemm_add_bias_kernel<half><<<grid_size, block_size, 0, stream>>>(M * N, N, (half*)C, (const half*)bias);
     }
 #endif
-
-    // descriptors are no longer needed as all GPU work was already enqueued
-    if (Cdesc) CUBLAS_CHECK_RC(cublasLtMatrixLayoutDestroy(Cdesc));
-    if (Bdesc) CUBLAS_CHECK_RC(cublasLtMatrixLayoutDestroy(Bdesc));
-    if (Adesc) CUBLAS_CHECK_RC(cublasLtMatrixLayoutDestroy(Adesc));
-    if (operationDesc) CUBLAS_CHECK_RC(cublasLtMatmulDescDestroy(operationDesc));
     
     return ppl::common::RC_SUCCESS;
 }
 
-ppl::common::RetCode int8_gemm(
+ppl::common::RetCode gemm_i8i8i32(
     const cudaStream_t stream,
     const cublasLtHandle_t& cublaslt_handle,
     const cublasLtMatmulAlgo_t* algo,
@@ -167,6 +163,7 @@ ppl::common::RetCode int8_gemm(
     const int32_t beta, // int32-C need
     const int64_t workspace_size,
     void* workspace,
+    cublaslt_algo_cache_t* algo_cache,
     const int64_t ldc, // N
     const ppl::common::datatype_t typec, // int32
     void* C) // int32
@@ -183,9 +180,19 @@ ppl::common::RetCode int8_gemm(
         LOG(ERROR) << "only support int32 C matrix";
         return ppl::common::RC_UNSUPPORTED;
     }
+    if (transa != false) {
+        LOG(ERROR) << "only support non-transposed A matrix";
+        return ppl::common::RC_UNSUPPORTED;
+    }
+    if (transb != true) {
+        LOG(ERROR) << "only support transposed B matrix";
+        return ppl::common::RC_UNSUPPORTED;
+    }
 
-    cublasLtMatmulDesc_t operationDesc = nullptr;
-    cublasLtMatrixLayout_t Adesc = nullptr, Bdesc = nullptr, Cdesc = nullptr;
+    cublasLtMatmulDescOpaque_t OODesc{0};
+    cublasLtMatmulDesc_t operationDesc = &OODesc;
+    cublasLtMatrixLayoutOpaque_t AODesc{0}, BODesc{0}, CODesc{0};
+    cublasLtMatrixLayout_t Adesc = &AODesc, Bdesc = &BODesc, Cdesc = &CODesc;
 
     cublasOperation_t cublas_transa = transa == true ? CUBLAS_OP_T : CUBLAS_OP_N;
     cublasOperation_t cublas_transb = transb == true ? CUBLAS_OP_T : CUBLAS_OP_N;
@@ -195,10 +202,10 @@ ppl::common::RetCode int8_gemm(
 
 #if (CUDART_VERSION >= 11000)
     cublasComputeType_t computeType = CUBLAS_COMPUTE_32I;
-    CUBLAS_CHECK_RC(cublasLtMatmulDescCreate(&operationDesc, computeType, scaleType));
+    CUBLAS_CHECK_RC(cublasLtMatmulDescInit(operationDesc, computeType, scaleType));
 #else
     cudaDataType_t computeType = scaleType;
-    CUBLAS_CHECK_RC(cublasLtMatmulDescCreate(&operationDesc, computeType));
+    CUBLAS_CHECK_RC(cublasLtMatmulDescInit(operationDesc, computeType));
 #endif
 
     // exchange A & B to col-major
@@ -212,10 +219,81 @@ ppl::common::RetCode int8_gemm(
         CUBLAS_CHECK_RC(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_BIAS_POINTER, &bias, sizeof(void*)));
     }
 #endif
+
+    // find algo online
+    // TODO: why it will crash in some case if not aligned
+    cublasLtMatmulAlgo_t algo_value;
+    bool                 found_algo = false;
+    if (algo == nullptr) {
+        // create matrix descriptors for algo select, align MNK to power of 2
+        int64_t M_shift = 0;
+        int64_t M_aligned = M;
+        while (M_aligned >>= 2)
+            ++M_shift;
+        M_aligned = 1 << (M_shift * 2);
+
+        int64_t K_shift = 0;
+        int64_t K_aligned = K;
+        while (K_aligned >>= 2)
+            ++K_shift;
+        K_aligned = 1 << (K_shift * 2);
+        K_aligned = std::max<int64_t>(K / 256 * 256, K_aligned);
+
+        int64_t N_shift = 0;
+        int64_t N_aligned = N;
+        while (N_aligned >>= 2)
+            ++N_shift;
+        N_aligned = 1 << (N_shift * 2);
+        N_aligned = std::max<int64_t>(N / 256 * 256, N_aligned);
+
+        CUBLAS_CHECK_RC(cublasLtMatrixLayoutInit(Adesc, abType, cublas_transa == CUBLAS_OP_N ? K_aligned : M_aligned, cublas_transa == CUBLAS_OP_N ? M_aligned : K_aligned, lda));
+        CUBLAS_CHECK_RC(cublasLtMatrixLayoutInit(Bdesc, abType, cublas_transb == CUBLAS_OP_N ? N_aligned : K_aligned, cublas_transb == CUBLAS_OP_N ? K_aligned : N_aligned, ldb));
+        CUBLAS_CHECK_RC(cublasLtMatrixLayoutInit(Cdesc, cType, N_aligned, M_aligned, ldc));
+
+        cublaslt_algo_cache_idx_t cache_idx{
+            create_cublas_matmul_desc(operationDesc),
+            {create_cublas_matrix_layout(Bdesc),
+            create_cublas_matrix_layout(Adesc),
+            create_cublas_matrix_layout(Cdesc),
+            create_cublas_matrix_layout(Cdesc)}};
+
+        auto algo_cache_it = algo_cache->find(cache_idx);
+        if (algo_cache_it == algo_cache->end()) {
+            auto result =
+                cublaslt_find_best_algo(
+                    stream,
+                    cublaslt_handle,
+                    operationDesc,
+                    (const void*)(&alpha),
+                    B,
+                    Bdesc,
+                    A,
+                    Adesc,
+                    (const void*)(&beta),
+                    C,
+                    Cdesc,
+                    C,
+                    Cdesc,
+                    workspace_size,
+                    workspace);
+            if (result.first == ppl::common::RC_SUCCESS) {
+                algo_cache->emplace(cache_idx, result.second);
+                algo_value = result.second;
+                found_algo = true;
+            } else {
+                LOG(ERROR) << "cublas find algo failed, (M,N,K) = (" << M << "," << N << "," << K <<")";
+                return result.first;
+            }
+        } else {
+            algo_value = algo_cache_it->second;
+            found_algo = true;
+        }
+    }
+
     // create matrix descriptors, we are good with the details here so no need to set any extra attributes
-    CUBLAS_CHECK_RC(cublasLtMatrixLayoutCreate(&Adesc, abType, cublas_transa == CUBLAS_OP_N ? K : M, cublas_transa == CUBLAS_OP_N ? M : K, lda));
-    CUBLAS_CHECK_RC(cublasLtMatrixLayoutCreate(&Bdesc, abType, cublas_transb == CUBLAS_OP_N ? N : K, cublas_transb == CUBLAS_OP_N ? K : N, ldb));
-    CUBLAS_CHECK_RC(cublasLtMatrixLayoutCreate(&Cdesc, cType, N, M, ldc));
+    CUBLAS_CHECK_RC(cublasLtMatrixLayoutInit(Adesc, abType, cublas_transa == CUBLAS_OP_N ? K : M, cublas_transa == CUBLAS_OP_N ? M : K, lda));
+    CUBLAS_CHECK_RC(cublasLtMatrixLayoutInit(Bdesc, abType, cublas_transb == CUBLAS_OP_N ? N : K, cublas_transb == CUBLAS_OP_N ? K : N, ldb));
+    CUBLAS_CHECK_RC(cublasLtMatrixLayoutInit(Cdesc, cType, N, M, ldc));
 
     CUBLAS_CHECK_RC(cublasLtMatmul(
         cublaslt_handle,
@@ -230,7 +308,7 @@ ppl::common::RetCode int8_gemm(
         Cdesc,
         C,
         Cdesc,
-        nullptr,
+        found_algo ? &algo_value : algo,
         workspace,
         workspace_size,
         stream));
@@ -245,12 +323,128 @@ ppl::common::RetCode int8_gemm(
     }
 #endif
 
-    // descriptors are no longer needed as all GPU work was already enqueued
-    if (Cdesc) CUBLAS_CHECK_RC(cublasLtMatrixLayoutDestroy(Cdesc));
-    if (Bdesc) CUBLAS_CHECK_RC(cublasLtMatrixLayoutDestroy(Bdesc));
-    if (Adesc) CUBLAS_CHECK_RC(cublasLtMatrixLayoutDestroy(Adesc));
-    if (operationDesc) CUBLAS_CHECK_RC(cublasLtMatmulDescDestroy(operationDesc));
-    
+    return ppl::common::RC_SUCCESS;
+}
+
+ppl::common::RetCode gemm_i8i8i32_col32(
+    const cudaStream_t stream,
+    const cublasLtHandle_t& cublaslt_handle,
+    const void* input_col32,
+    const void* kernel,
+    const int64_t M,
+    const int64_t N,
+    const int64_t K,
+    const bool use_4r4_kernel,
+    void* output_col32)
+{
+    cublasOperation_t opTranspose = CUBLAS_OP_T;
+#if (CUDART_VERSION >= 11000)
+    cublasComputeType_t computeType = CUBLAS_COMPUTE_32I;
+#else
+    cudaDataType_t computeType = CUDA_R_32I;
+#endif
+
+    cublasLtMatmulDescOpaque_t OODesc{0};
+    cublasLtMatrixLayoutOpaque_t AODesc{0}, BODesc{0}, CODesc{0};
+    cublasLtMatmulDesc_t   matmulDesc = &OODesc;
+    cublasLtMatrixLayout_t AtransformDesc = &AODesc;
+    cublasLtMatrixLayout_t BtransformDesc = &BODesc;
+    cublasLtMatrixLayout_t CtransformDesc = &CODesc;
+    cublasLtOrder_t        order_COL32    = CUBLASLT_ORDER_COL32;
+
+    cublasLtOrder_t order_matrixB;
+#if (CUDART_VERSION >= 11000)
+    if (use_4r4_kernel) {
+        order_matrixB = CUBLASLT_ORDER_COL32_2R_4R4;
+    } else {
+        order_matrixB = CUBLASLT_ORDER_COL4_4R2_8C;
+    }
+#else
+    order_matrixB = CUBLASLT_ORDER_COL4_4R2_8C;
+#endif
+
+    int ldaTransform = 32 * M;
+    int ldbTransform;
+    if (use_4r4_kernel) {
+        ldbTransform = 32 * ((N + 32 - 1) / 32) * 32;
+    }
+    else {
+        ldbTransform = 32 * ((N + 8 - 1) / 8) * 8;
+    }
+    int ldcTransform = 32 * M;
+
+    // create matmulDesc
+#if (CUDART_VERSION >= 11000)
+    CUBLAS_CHECK_RC(cublasLtMatmulDescInit(matmulDesc, computeType, CUDA_R_32I));
+#else
+    CUBLAS_CHECK_RC(cublasLtMatmulDescInit(matmulDesc, computeType));
+#endif
+    CUBLAS_CHECK_RC(cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_TRANSB, &opTranspose, sizeof(cublasOperation_t)));
+    CUBLAS_CHECK_RC(cublasLtMatrixLayoutInit(AtransformDesc, CUDA_R_8I, M, K, ldaTransform));
+    CUBLAS_CHECK_RC(cublasLtMatrixLayoutSetAttribute(AtransformDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &order_COL32, sizeof(order_COL32)));
+    CUBLAS_CHECK_RC(cublasLtMatrixLayoutInit(BtransformDesc, CUDA_R_8I, N, K, ldbTransform));
+    CUBLAS_CHECK_RC(cublasLtMatrixLayoutSetAttribute(
+        BtransformDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &order_matrixB, sizeof(order_matrixB)));
+    CUBLAS_CHECK_RC(cublasLtMatrixLayoutInit(CtransformDesc, CUDA_R_32I, M, N, ldcTransform));
+    CUBLAS_CHECK_RC(cublasLtMatrixLayoutSetAttribute(CtransformDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &order_COL32, sizeof(order_COL32)));
+
+    int alphaI = 1;
+    int betaI  = 0;
+
+    // get algo
+    cublasLtMatmulAlgo_t algo;
+    {
+        int algoId;
+        if (use_4r4_kernel) {
+            algoId = 7;
+        }
+        else {
+            algoId = 6;
+        }
+        int swizzle         = 0;
+        int customOption    = 0;
+        int tile            = CUBLASLT_MATMUL_TILE_128x128;
+        int splitK_val      = 0;
+        int reductionScheme = 0;
+        CUBLAS_CHECK_RC(cublasLtMatmulAlgoInit(
+            cublaslt_handle, computeType, CUDA_R_32I, CUDA_R_8I, CUDA_R_8I, CUDA_R_32I, CUDA_R_32I, algoId, &algo));
+        CUBLAS_CHECK_RC(cublasLtMatmulAlgoConfigSetAttribute(
+            &algo, CUBLASLT_ALGO_CONFIG_CUSTOM_OPTION, &(customOption), sizeof(customOption)));
+        CUBLAS_CHECK_RC(cublasLtMatmulAlgoConfigSetAttribute(&algo, CUBLASLT_ALGO_CONFIG_TILE_ID, &(tile), sizeof(tile)));
+        CUBLAS_CHECK_RC(cublasLtMatmulAlgoConfigSetAttribute(&algo, CUBLASLT_ALGO_CONFIG_SPLITK_NUM, &(splitK_val), sizeof(splitK_val)));
+        CUBLAS_CHECK_RC(cublasLtMatmulAlgoConfigSetAttribute(&algo, CUBLASLT_ALGO_CONFIG_CTA_SWIZZLING, &(swizzle), sizeof(swizzle)));
+        CUBLAS_CHECK_RC(cublasLtMatmulAlgoConfigSetAttribute(
+            &algo, CUBLASLT_ALGO_CONFIG_REDUCTION_SCHEME, &(reductionScheme), sizeof(int)));
+#if (CUDART_VERSION >= 11000)
+        int stages;
+        if (use_4r4_kernel) {
+            stages = CUBLASLT_MATMUL_STAGES_64x3;
+        }
+        else {
+            stages = CUBLASLT_MATMUL_STAGES_64x1;
+        }
+        CUBLAS_CHECK_RC(cublasLtMatmulAlgoConfigSetAttribute(&algo, CUBLASLT_ALGO_CONFIG_STAGES_ID, &(stages), sizeof(stages)));
+#endif
+    }
+
+    CUBLAS_CHECK_RC(cublasLtMatmul(
+        cublaslt_handle,
+        matmulDesc,
+        &alphaI,
+        input_col32,
+        AtransformDesc,
+        kernel,
+        BtransformDesc,
+        &betaI,
+        output_col32,
+        CtransformDesc,
+        output_col32,
+        CtransformDesc,
+        &algo,
+        nullptr,
+        0,
+        stream));
+
     return ppl::common::RC_SUCCESS;
 }
 
