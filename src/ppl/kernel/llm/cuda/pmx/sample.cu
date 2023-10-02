@@ -424,14 +424,18 @@ void sample_argmax_kernel(
     // initilize shared memory
     constexpr int32_t WARP_SIZE = 32;
     constexpr int32_t WPT = TPB / WARP_SIZE;
+    constexpr int32_t RED_SMEM_SIZE = WPT + WARP_SIZE;
+
     __shared__ int32_t buffer[TPB];
-    __shared__ fp32_t red_smem[WPT];
+    __shared__ fp32_t red_smem[RED_SMEM_SIZE];
+
     buffer[threadIdx.x] = selection_idx;
     __syncthreads();
 
     SortingPair p = sample_block_reduce_max_with_index<WPT>(selecting_value, red_smem);
-    if (threadIdx.x == 0)
+    if (threadIdx.x == 0){
         output[batch_id] = buffer[p.index];
+    }
 }
 
 ppl::common::RetCode sample_argmax(
