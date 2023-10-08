@@ -45,38 +45,40 @@ struct dynamic_batching_decoding_cache_attention_kernel_param {
     int64_t cache_stride_kv;
 };
 
+struct dynamic_batching_kv_cache_quantize_kernel_param {
+    half* current_key; // (S, KVH..., D)
+    half* current_value; // (S, KVH..., D)
+    int64_t* seqstarts; // (B + 1)
+    int64_t* cachestarts;// (B)
+    int64_t* start_pos; // (B)
+    int64_t num_layer;
+    int64_t layer_idx;
+    int64_t num_kv_heads;
+    int64_t current_key_stride_s;
+    int64_t current_value_stride_s;
+    int64_t cache_stride_s;
+    int64_t cache_stride_l;
+    int64_t cache_stride_h;
+    int64_t cache_stride_kv;
+    int8_t* cache;
+    half* scale;
+};
 
 template<int32_t HEAD_SIZE, int32_t VPT> // 8 fp16 occupy 128 bytes, which can be loaded by a single thread at once.
 __global__
-void dynamic_batching_kv_cache_quantize_kernel(
-    const half* current_key, // (S, KVH..., D)
-    const half* current_value, // (S, KVH..., D)
-    const int64_t* seqstarts, // (B + 1)
-    const int64_t* cachestarts,// (B)
-    const int64_t* start_pos, // (B)
-    const int64_t num_layer,
-    const int64_t layer_idx,
-    const int64_t num_kv_heads,
-    const int64_t current_key_stride_s,
-    const int64_t current_value_stride_s,
-    const int64_t cache_stride_s,
-    const int64_t cache_stride_l,
-    const int64_t cache_stride_h,
-    const int64_t cache_stride_kv,
-    int8_t* cache,
-    half* scale)
+void dynamic_batching_kv_cache_quantize_kernel(dynamic_batching_kv_cache_quantize_kernel_param p)
 {
-    if (blockIdx.y < seqstarts[blockIdx.x + 1] - seqstarts[blockIdx.x]) {
+    if (blockIdx.y < p.seqstarts[blockIdx.x + 1] - p.seqstarts[blockIdx.x]) {
         constexpr int64_t thd_per_head_size = HEAD_SIZE / VPT;
         const int64_t batch_id = blockIdx.x;
         const int64_t seq_idx = blockIdx.y;
-        const int64_t input_token_idx = seqstarts[batch_id] + seq_idx;
-        const int64_t cache_token_idx = cachestarts[batch_id] + seq_idx + start_pos[batch_id];
-        const int64_t key_out_offset = cache_token_idx * cache_stride_s + layer_idx * cache_stride_l;
-        auto key_in_ptr = current_key + input_token_idx * current_key_stride_s;
-        auto value_in_ptr = current_value + input_token_idx * current_value_stride_s;
+        const int64_t input_token_idx = p.seqstarts[batch_id] + seq_idx;
+        const int64_t cache_token_idx = p.cachestarts[batch_id] + seq_idx + p.start_pos[batch_id];
+        const int64_t key_out_offset = cache_token_idx * p.cache_stride_s + p.layer_idx * p.cache_stride_l;
+        auto key_in_ptr = p.current_key + input_token_idx * p.current_key_stride_s;
+        auto value_in_ptr = p.current_value + input_token_idx * p.current_value_stride_s;
 
-        for (int32_t tid = threadIdx.x; tid < HEAD_SIZE * num_kv_heads / VPT; tid += blockDim.x) {
+        for (int32_t tid = threadIdx.x; tid < HEAD_SIZE * p.num_kv_heads / VPT; tid += blockDim.x) {
             const int64_t kv_head_idx = tid / thd_per_head_size;
             const int64_t dim_idx = (tid % thd_per_head_size) * VPT;
             const int64_t scale_dim_idx = dim_idx / VPT;
@@ -90,14 +92,14 @@ void dynamic_batching_kv_cache_quantize_kernel(
 
             const int64_t key_out_idx
                 = key_out_offset
-                + kv_head_idx * cache_stride_h
+                + kv_head_idx * p.cache_stride_h
                 + dim_idx;
             const int64_t value_out_idx
                 = key_out_idx
-                + cache_stride_kv;
+                + p.cache_stride_kv;
 
             const int64_t key_scale_out_idx = (key_out_idx - dim_idx) / VPT + scale_dim_idx;
-            const int64_t value_scale_out_idx = key_scale_out_idx + cache_stride_kv / VPT;
+            const int64_t value_scale_out_idx = key_scale_out_idx + p.cache_stride_kv / VPT;
 
             // calculate kv scale
             const half eps = 1e-5f;
@@ -122,11 +124,11 @@ void dynamic_batching_kv_cache_quantize_kernel(
                 value_out[i] = (int8_t)__half2short_rn(value_in[i] / value_scale);
             }
 
-            copy<sizeof(int8_t) * VPT>(key_out, &cache[key_out_idx]);
-            copy<sizeof(int8_t) * VPT>(value_out, &cache[value_out_idx]);
+            copy<sizeof(int8_t) * VPT>(key_out, &p.cache[key_out_idx]);
+            copy<sizeof(int8_t) * VPT>(value_out, &p.cache[value_out_idx]);
 
-            scale[key_scale_out_idx] = key_scale;
-            scale[value_scale_out_idx] = value_scale;
+            p.scale[key_scale_out_idx] = key_scale;
+            p.scale[value_scale_out_idx] = value_scale;
         }
     }
 }
@@ -216,7 +218,7 @@ template<
     int32_t QUANT_GROUP,
     bool SHIFT_KV>
 __global__
-void dynamic_batching_decoding_cache_attention_fp16_kernel(struct dynamic_batching_decoding_cache_attention_kernel_param p)
+void dynamic_batching_decoding_cache_attention_fp16_kernel(dynamic_batching_decoding_cache_attention_kernel_param p)
 {
     /***
     * You have to remember that this Kernel was created by a brother on the night of July 20, 2023. On that day,
@@ -611,7 +613,7 @@ ppl::common::RetCode dynamic_batch_multi_head_cache_attention(
         dim3 grid(batch, max_seqlen);
         const int32_t block_size = GetBlockSize(num_kv_heads * head_dim / 8);
         dynamic_batching_kv_cache_quantize_kernel<128, 8><<<grid, block_size, 0, stream>>>(
-            (half*)current_key,
+            {(half*)current_key,
             (half*)current_value,
             (int64_t*)seqstarts,
             (int64_t*)cachestarts,
@@ -626,7 +628,7 @@ ppl::common::RetCode dynamic_batch_multi_head_cache_attention(
             cache_stride_h,
             cache_stride_kv,
             (int8_t*)cache,
-            (half*)scale);
+            (half*)scale});
     }
 
     if(decodeing_q_num > 0) {
