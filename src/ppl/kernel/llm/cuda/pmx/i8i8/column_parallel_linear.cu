@@ -19,6 +19,7 @@
 #include "ppl/common/log.h"
 
 #include "cudakernel/memory/transpose.h"
+#include "ppl/kernel/llm/cuda/pmx/i8i8/quantize.h"
 
 namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pmx { namespace i8i8 {
 
@@ -35,12 +36,17 @@ ppl::common::RetCode column_parallel_linear(
     const void* weight,
     const ppl::common::TensorShape* bias_shape,
     const void* bias,
+    const void* scale_M,
+    const void* scale_N,
+    const float down_scale_M,
+    const float down_scale_N,
     const int64_t in_features,
     const int64_t out_features,
     const bool use_4r4_weight,
     ppl::common::NcclParam* nccl_param,
     const bool gather_output,
     void* gather_buffer,
+    void* quant_buffer,
     const int64_t cublas_workspace_size,
     void* cublas_workspace,
     ppl::kernel::llm::cuda::cublas::cublaslt_algo_cache_t* cublas_algo_cache,
@@ -52,13 +58,22 @@ ppl::common::RetCode column_parallel_linear(
     // gemm_output (M, Nw)
     // output (M, N)
 
+    if (bias && bias_shape->GetDataType() != ppl::common::DATATYPE_FLOAT16) {
+        LOG(ERROR) << "only support fp16 bias";
+        return ppl::common::RC_UNSUPPORTED;
+    }
+
     const int64_t M = input_shape->CalcElementsToDimensionExcludingPadding(input_shape->GetDimCount() - 1);
     const int64_t Nw = out_features / nccl_param->size;
     const int64_t K = in_features;
 
     void *gemm_output = output;
+    void *dequant_output = output;
+    if (gather_output) {
+        gemm_output = quant_buffer;
+    }
     if (gather_output && nccl_param->size > 1) {
-        gemm_output = (char*)gather_buffer
+        dequant_output = (char*)gather_buffer
             + nccl_param->rank * M * Nw * ppl::common::GetSizeOfDataType(output_shape->GetDataType());
     }
 
@@ -78,7 +93,7 @@ ppl::common::RetCode column_parallel_linear(
     //     K,
     //     weight_shape->GetDataType(),
     //     weight,
-    //     bias,
+    //     nullptr,
     //     M,
     //     Nw,
     //     K,
@@ -105,13 +120,29 @@ ppl::common::RetCode column_parallel_linear(
     if (ppl::common::RC_SUCCESS != status)
         return status;
 
-    if (gather_output && nccl_param->size > 1) {
-        LOG(ERROR) << "gather output is unsupported";
-        return ppl::common::RC_UNSUPPORTED;
+    if (gather_output) {
+        status = ppl::kernel::llm::cuda::pmx::i8i8::minmax_dequantize_fp16(
+            stream,
+            gemm_output,
+            bias,
+            scale_M,
+            scale_N,
+            M,
+            Nw,
+            down_scale_M,
+            down_scale_N,
+            ppl::kernel::llm::cuda::MATRIX_LAYOUT_COL32,
+            dequant_output
+        );
 
-        status = ppl::common::NcclAllGather<int32_t>(
-            (int32_t*)gemm_output,
-            (int32_t*)gather_buffer,
+        if (ppl::common::RC_SUCCESS != status)
+            return status;
+    }
+
+    if (gather_output && nccl_param->size > 1) {
+        status = ppl::common::NcclAllGather<half>(
+            (half*)dequant_output,
+            (half*)gather_buffer,
             M * Nw,
             nccl_param,
             stream);

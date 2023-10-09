@@ -23,6 +23,8 @@
 #include "ppl/kernel/llm/cuda/cublas/gemm.h"
 #include "ppl/common/cuda/nccl_utils.h"
 
+#include "quantize.h"
+
 namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pmx { namespace i8i8 {
 
 // input should be m*k, CUBLASLT_ORDER_COL32
@@ -38,12 +40,17 @@ ppl::common::RetCode column_parallel_linear(
     const void* weight,
     const ppl::common::TensorShape* bias_shape,
     const void* bias,
+    const void* scale_M,
+    const void* scale_N,
+    const float down_scale_M,
+    const float down_scale_N,
     const int64_t in_features,
     const int64_t out_features,
     const bool use_4r4_weight,
     ppl::common::NcclParam* nccl_param,
     const bool gather_output,
     void* gather_buffer,
+    void* quant_buffer,
     const int64_t cublas_workspace_size,
     void* cublas_workspace,
     ppl::kernel::llm::cuda::cublas::cublaslt_algo_cache_t* cublas_algo_cache,

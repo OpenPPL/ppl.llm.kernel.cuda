@@ -57,6 +57,11 @@ ppl::common::RetCode row_parallel_linear(
         return ppl::common::RC_UNSUPPORTED;
     }
 
+    if (bias && bias_shape->GetDataType() != ppl::common::DATATYPE_FLOAT16) {
+        LOG(ERROR) << "only support fp16 bias";
+        return ppl::common::RC_UNSUPPORTED;
+    }
+
     // input (M, K/w)
     // weight (N, K/w)
     // output (M, N)
@@ -81,7 +86,7 @@ ppl::common::RetCode row_parallel_linear(
     //     Kw,
     //     weight_shape->GetDataType(),
     //     weight,
-    //     bias,
+    //     nullptr,
     //     M,
     //     N,
     //     Kw,
@@ -111,6 +116,7 @@ ppl::common::RetCode row_parallel_linear(
     status = ppl::kernel::llm::cuda::pmx::i8i8::minmax_dequantize_fp16(
         stream,
         quant_buffer,
+        bias,
         scale_M,
         scale_N,
         M,

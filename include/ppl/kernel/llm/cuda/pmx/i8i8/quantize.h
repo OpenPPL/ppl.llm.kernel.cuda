@@ -43,6 +43,7 @@ ppl::common::RetCode minmax_quantize_fp16(
 ppl::common::RetCode minmax_dequantize_fp16(
     cudaStream_t stream,
     const void* input,    // int32，[batch, quant_dim(channel)] or [M, N]
+    const void* optional_bias, // fp16, [quant_dim]
     const void* scale_per_batch,   // fp16, [batch]
     const void* scale_per_channel, // fp16, [quant_dim]
     const int64_t batch,

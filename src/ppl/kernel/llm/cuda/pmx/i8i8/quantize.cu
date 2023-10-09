@@ -114,6 +114,7 @@ template<int32_t TPB, int32_t VPT, matrix_layout_t FROM_LAYOUT>
 __global__
 void minmax_dequantize_fp16_kernel(
     const int32_t* input,    //  col32 layout [batch, quant_dim(channel)] or [M, N]
+    const half* optional_bias, // fp16, [quant_dim]
     const half* scale_per_batch,
     const half* scale_per_channel,
     const int64_t batch,
@@ -142,6 +143,14 @@ void minmax_dequantize_fp16_kernel(
         for(int32_t i = 0; i < VPT; i++){
             local_out[i] = __float2half(local_in[i] * __half2float(local_w[i]) * down_scale_channel * batch_scale);
         }
+
+        if (optional_bias) {
+            copy<sizeof(half) * VPT>(&optional_bias[tile_offset + threadIdx.x * VPT], local_w);
+            for(int32_t i = 0; i < VPT; i++){
+                local_out[i] = local_out[i] + local_w[i];
+            }
+        }
+
         copy<sizeof(half) * VPT>(local_out, &output[batch_offset + tile_offset + threadIdx.x * VPT]);
     }
 }
@@ -149,6 +158,7 @@ void minmax_dequantize_fp16_kernel(
 ppl::common::RetCode minmax_dequantize_fp16(
     cudaStream_t stream,
     const void* input,    // int32，[batch, quant_dim(channel)] or [M, N]
+    const void* optional_bias, // fp16, [quant_dim]
     const void* scale_per_batch,   // fp16, [batch]
     const void* scale_per_channel, // fp16, [quant_dim]
     const int64_t batch,
@@ -175,31 +185,31 @@ ppl::common::RetCode minmax_dequantize_fp16(
     if (from_layout == MATRIX_LAYOUT_ROW_MAJOR) {
         minmax_dequantize_fp16_kernel<TPB, VPT, MATRIX_LAYOUT_ROW_MAJOR>
         <<<block_grid, TPB, 0, stream>>> (
-            (const int32_t*)input, (const half*)scale_per_batch, (const half*)scale_per_channel,
+            (const int32_t*)input, (const half*)optional_bias, (const half*)scale_per_batch, (const half*)scale_per_channel,
             batch, quant_dim, down_scale_batch, down_scale_channel, (half*)output
         );
     } else if (from_layout == MATRIX_LAYOUT_COL_MAJOR) {
         minmax_dequantize_fp16_kernel<TPB, VPT, MATRIX_LAYOUT_COL_MAJOR>
         <<<block_grid, TPB, 0, stream>>> (
-            (const int32_t*)input, (const half*)scale_per_batch, (const half*)scale_per_channel,
+            (const int32_t*)input, (const half*)optional_bias, (const half*)scale_per_batch, (const half*)scale_per_channel,
             batch, quant_dim, down_scale_batch, down_scale_channel, (half*)output
         );
     } else if (from_layout == MATRIX_LAYOUT_COL32) {
         minmax_dequantize_fp16_kernel<TPB, VPT, MATRIX_LAYOUT_COL32>
         <<<block_grid, TPB, 0, stream>>> (
-            (const int32_t*)input, (const half*)scale_per_batch, (const half*)scale_per_channel,
+            (const int32_t*)input, (const half*)optional_bias, (const half*)scale_per_batch, (const half*)scale_per_channel,
             batch, quant_dim, down_scale_batch, down_scale_channel, (half*)output
         );
     } else if (from_layout == MATRIX_LAYOUT_COL4_4R2_8C) {
         minmax_dequantize_fp16_kernel<TPB, VPT, MATRIX_LAYOUT_COL4_4R2_8C>
         <<<block_grid, TPB, 0, stream>>> (
-            (const int32_t*)input, (const half*)scale_per_batch, (const half*)scale_per_channel,
+            (const int32_t*)input, (const half*)optional_bias, (const half*)scale_per_batch, (const half*)scale_per_channel,
             batch, quant_dim, down_scale_batch, down_scale_channel, (half*)output
         );
     } else if (from_layout == MATRIX_LAYOUT_COL32_2R_4R4) {
         minmax_dequantize_fp16_kernel<TPB, VPT, MATRIX_LAYOUT_COL32_2R_4R4>
         <<<block_grid, TPB, 0, stream>>> (
-            (const int32_t*)input, (const half*)scale_per_batch, (const half*)scale_per_channel,
+            (const int32_t*)input, (const half*)optional_bias, (const half*)scale_per_batch, (const half*)scale_per_channel,
             batch, quant_dim, down_scale_batch, down_scale_channel, (half*)output
         );
     } else {
