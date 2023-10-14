@@ -18,10 +18,6 @@
 #include "ppl/kernel/llm/cuda/pmx/sample.h"
 #include "ppl/common/log.h"
 
-#include "cudakernel/common/common.cuh"
-
-#include <cuda_runtime.h>
-#include <float.h>
 #include <cub/cub.cuh>
 
 namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pmx {

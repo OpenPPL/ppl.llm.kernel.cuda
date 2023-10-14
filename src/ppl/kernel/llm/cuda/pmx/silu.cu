@@ -18,11 +18,9 @@
 #include "ppl/kernel/llm/cuda/pmx/silu.h"
 #include "ppl/common/log.h"
 
-#include <cuda_fp16.h>
-
 namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pmx {
 
-template<bool GATED>
+template <typename T, bool GATED>
 __global__ void silu_kernel_fp16(
     const half *input,
     const half *gate,
@@ -44,7 +42,7 @@ __global__ void silu_kernel_fp16(
 }
 
 
-template<bool GATED>
+template <typename T, bool GATED>
 __global__ void silu_kernel_packed_fp16(
     const half2 *input,
     const half2 *gate,
@@ -71,13 +69,13 @@ __global__ void silu_kernel_packed_fp16(
     }
 }
 
+template <typename T> 
 ppl::common::RetCode silu(
     cudaStream_t stream,
     const ppl::common::TensorShape* input_shape,
     const void* input,
     const void* optional_gate,
-    void* output)
-{
+    void* output) {
     if (input_shape->GetDataType() != ppl::common::DATATYPE_FLOAT16) {
         LOG(ERROR) << "currently only support fp16.";
         return ppl::common::RC_UNSUPPORTED;
@@ -89,24 +87,26 @@ ppl::common::RetCode silu(
     if (num_elem & 1) {
         const int64_t BPG = (num_elem + TPB - 1) / TPB;
         if (optional_gate) {
-            silu_kernel_fp16<true><<<BPG, TPB, 0, stream>>>(
+            silu_kernel_fp16<T, true><<<BPG, TPB, 0, stream>>>(
                 (const half*)input, (const half*)optional_gate, num_elem, (half*)output);
         } else {
-            silu_kernel_fp16<false><<<BPG, TPB, 0, stream>>>(
+            silu_kernel_fp16<T, false><<<BPG, TPB, 0, stream>>>(
                 (const half*)input, (const half*)optional_gate, num_elem, (half*)output);
         }
     } else {
         const int64_t BPG = ((num_elem >> 1) + TPB - 1) / TPB;
         if (optional_gate) {
-            silu_kernel_packed_fp16<true><<<BPG, TPB, 0, stream>>>(
+            silu_kernel_packed_fp16<T, true><<<BPG, TPB, 0, stream>>>(
                 (const half2*)input, (const half2*)optional_gate, num_elem >> 1, (half2*)output);
         } else {
-            silu_kernel_packed_fp16<false><<<BPG, TPB, 0, stream>>>(
+            silu_kernel_packed_fp16<T, false><<<BPG, TPB, 0, stream>>>(
                 (const half2*)input, (const half2*)optional_gate, num_elem >> 1, (half2*)output);
         }
     }
 
     return ppl::common::RC_SUCCESS;
 }
+
+FUNCTION_REGISTER(silu)
 
 }}}}}

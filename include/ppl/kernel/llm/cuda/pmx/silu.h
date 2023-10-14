@@ -22,6 +22,7 @@
 
 namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pmx {
 
+template <typename T>
 ppl::common::RetCode silu(
     cudaStream_t stream,
     const ppl::common::TensorShape* input_shape,

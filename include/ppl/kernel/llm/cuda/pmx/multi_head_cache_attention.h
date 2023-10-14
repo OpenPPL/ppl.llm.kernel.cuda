@@ -22,6 +22,7 @@
 
 namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pmx {
 
+template <typename T>
 ppl::common::RetCode dynamic_batch_multi_head_cache_attention(
     const cudaStream_t stream,
     const cudaDeviceProp& device_prop,

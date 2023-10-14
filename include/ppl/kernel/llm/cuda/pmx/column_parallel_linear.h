@@ -25,6 +25,7 @@
 
 namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pmx {
 
+template <typename T>
 ppl::common::RetCode column_parallel_linear(
     const cudaStream_t stream,
     const cublasLtHandle_t& cublaslt_handle,

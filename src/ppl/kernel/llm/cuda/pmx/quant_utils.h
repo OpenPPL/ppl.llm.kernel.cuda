@@ -20,9 +20,6 @@
 
 #include "ppl/kernel/llm/cuda/common/general_include.h"
 
-#include <cuda_fp16.h>
-#include <float.h>
-
 namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pmx {
 
 /*

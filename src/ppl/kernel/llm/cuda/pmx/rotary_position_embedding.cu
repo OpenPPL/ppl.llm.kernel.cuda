@@ -18,8 +18,6 @@
 #include "ppl/kernel/llm/cuda/pmx/rotary_position_embedding.h"
 #include "ppl/common/log.h"
 
-#include "cudakernel/common/common.cuh"
-
 namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pmx {
 
 /**

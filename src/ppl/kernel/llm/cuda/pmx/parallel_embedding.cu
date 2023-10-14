@@ -15,13 +15,12 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include "ppl/kernel/llm/cuda/pmx/column_parallel_linear.h"
+#include "ppl/kernel/llm/cuda/pmx/parallel_embedding.h"
 #include "ppl/common/log.h"
 
 #include "cudakernel/common/common.cuh"
 #include "cudakernel/memory/transpose.h"
 
-#include <cuda_fp16.h>
 
 namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pmx {
 
@@ -55,6 +54,7 @@ void embedding_kernel_default(
     }
 }
 
+template <typename T>
 ppl::common::RetCode parallel_embedding(
     const cudaStream_t stream,
     const ppl::common::TensorShape* indices_shape,
@@ -147,5 +147,7 @@ ppl::common::RetCode parallel_embedding(
 
     return ppl::common::RC_SUCCESS;
 }
+
+FUNCTION_REGISTER(parallel_embedding)
 
 }}}}}

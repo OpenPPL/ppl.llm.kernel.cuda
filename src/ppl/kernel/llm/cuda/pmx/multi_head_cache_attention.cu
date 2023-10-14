@@ -19,10 +19,6 @@
 #include "ppl/common/log.h"
 
 #include "../../../../../llm/xformer_fmha/xformer_fmha.h"
-#include "cudakernel/common/common.cuh"
-
-#include <cuda_fp16.h>
-#include <float.h> // need for FLT_MAX
 
 namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pmx {
 
@@ -493,7 +489,7 @@ void dynamic_batching_decoding_cache_attention_fp16_kernel(dynamic_batching_deco
 }
 
 
-
+template <typename T>
 ppl::common::RetCode dynamic_batch_multi_head_cache_attention(
     const cudaStream_t stream,
     const cudaDeviceProp& device_prop,
@@ -696,5 +692,7 @@ ppl::common::RetCode dynamic_batch_multi_head_cache_attention(
         return ppl::common::RC_SUCCESS;
     }
 }
+
+FUNCTION_REGISTER(dynamic_batch_multi_head_cache_attention)
 
 }}}}}

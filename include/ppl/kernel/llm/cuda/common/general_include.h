@@ -25,4 +25,5 @@
 #include <stdint.h>
 #include <cuda_runtime.h>
 
+#include "cudakernel/common/common.cuh"
 #endif
