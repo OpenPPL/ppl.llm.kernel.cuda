@@ -22,6 +22,7 @@
 
 namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pmx {
 
+template <typename T>
 ppl::common::RetCode rotary_position_embedding(
     cudaStream_t stream,
     const ppl::common::TensorShape* query_shape,
@@ -40,7 +41,7 @@ ppl::common::RetCode rotary_position_embedding(
     const ppl::common::TensorShape* rotated_key_shape,
     void* rotated_key); // (batch, seqlen, ..., head_dim), dim[2] is the leading dim of heads
 
-
+template <typename T>
 ppl::common::RetCode dynamic_batching_rotary_position_embedding(
     cudaStream_t stream,
     const ppl::common::TensorShape* query_shape,

@@ -15,14 +15,17 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef __PPL_KERNEL_LLM_CUDA_COMMON_GENERAL_INCLUDE_H__
-#define __PPL_KERNEL_LLM_CUDA_COMMON_GENERAL_INCLUDE_H__
+#ifndef __PPL_KERNEL_LLM_CUDA_COMMON_TYPE_DISPATCH_H__
+#define __PPL_KERNEL_LLM_CUDA_COMMON_TYPE_DISPATCH_H__
 
-#include "ppl/common/tensor_shape.h"
-#include "ppl/common/retcode.h"
-#include "ppl/kernel/llm/cuda/common/type_dispatch.h"
+#define FUNCTION_REIGSTER_INSTANTIATION(fn, data_type) \
+    template decltype(fn<data_type>) fn<data_type>;
 
-#include <stdint.h>
-#include <cuda_runtime.h>
+#define FUNCTION_REGISTER_WITH_TYPES(_, ...) \
+    _(__VA_ARGS__, half) \
+    _(__VA_ARGS__, __nv_bfloat16)
+
+#define FUNCTION_REGISTER(fn) \
+    FUNCTION_REGISTER_WITH_TYPES(FUNCTION_REIGSTER_INSTANTIATION, fn)
 
 #endif

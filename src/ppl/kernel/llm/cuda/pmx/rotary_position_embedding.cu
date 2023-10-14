@@ -20,8 +20,6 @@
 
 #include "cudakernel/common/common.cuh"
 
-#include <cuda_fp16.h>
-
 namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pmx {
 
 /**
@@ -48,9 +46,8 @@ float2 rotary_position_embedding_coeff(
     return ret;
 }
 
-template<int TPB>
-__global__
-void rotary_position_embedding_kernel(
+template<typename T, int TPB>
+__global__ void rotary_position_embedding_kernel(
     const half2 *query,
     const half2 *key,
     const int64_t* cu_start_pos,
@@ -120,6 +117,7 @@ void rotary_position_embedding_kernel(
     }
 }
 
+template <typename T>
 ppl::common::RetCode rotary_position_embedding(
     cudaStream_t stream,
     const ppl::common::TensorShape* query_shape,
@@ -180,7 +178,7 @@ ppl::common::RetCode rotary_position_embedding(
         (unsigned int)((num_heads * head_dim / (TPB * VPT)) + (num_heads * head_dim % (TPB * VPT) != 0))
     };
 
-    rotary_position_embedding_kernel<TPB><<<grid, TPB, 0, stream>>>(
+    rotary_position_embedding_kernel<T, TPB><<<grid, TPB, 0, stream>>>(
         (const half2*)query,
         (const half2*)key,
         (const int64_t*)cu_start_pos,
@@ -202,8 +200,8 @@ ppl::common::RetCode rotary_position_embedding(
     return ppl::common::RC_SUCCESS;
 }
 
-__global__
-void dynamic_batching_rotary_position_embedding_kernel(
+template <typename T>
+__global__ void dynamic_batching_rotary_position_embedding_kernel(
     const half2 *query,
     const half2 *key,
     const int64_t* start_pos,
@@ -219,8 +217,7 @@ void dynamic_batching_rotary_position_embedding_kernel(
     const int64_t rotated_query_stride_s,
     const int64_t rotated_key_stride_s,
     half2 *rotated_query,
-    half2 *rotated_key)
-{
+    half2 *rotated_key) {
     if (blockIdx.y < seqstarts[blockIdx.x + 1] - seqstarts[blockIdx.x]) {
         const int64_t batch_idx = blockIdx.x;
         const int64_t seq_idx = blockIdx.y;
@@ -271,6 +268,7 @@ void dynamic_batching_rotary_position_embedding_kernel(
     }
 }
 
+template <typename T>
 ppl::common::RetCode dynamic_batching_rotary_position_embedding(
     cudaStream_t stream,
     const ppl::common::TensorShape* query_shape,
@@ -325,7 +323,7 @@ ppl::common::RetCode dynamic_batching_rotary_position_embedding(
 
     const int32_t TPB = GetBlockSize(query_shape->GetDim(0) * num_heads * head_dim / 2);
     const dim3 grid(batch, max_seqlen);
-    dynamic_batching_rotary_position_embedding_kernel<<<grid, TPB, 0, stream>>>(
+    dynamic_batching_rotary_position_embedding_kernel<T><<<grid, TPB, 0, stream>>>(
         (const half2*)query,
         (const half2*)key,
         (const int64_t*)start_pos,
@@ -346,5 +344,8 @@ ppl::common::RetCode dynamic_batching_rotary_position_embedding(
     
     return ppl::common::RC_SUCCESS;
 }
+
+FUNCTION_REGISTER(rotary_position_embedding)
+FUNCTION_REGISTER(dynamic_batching_rotary_position_embedding);
 
 }}}}}
