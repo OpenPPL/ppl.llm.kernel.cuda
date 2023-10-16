@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include "ppl/kernel/llm/cuda/pmx/column_parallel_linear.h"
+#include "ppl/kernel/llm/cuda/pmx/parallel_embedding.h"
 #include "ppl/common/log.h"
 
 #include "cudakernel/common/common.cuh"
