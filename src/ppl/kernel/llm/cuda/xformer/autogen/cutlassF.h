@@ -8,7 +8,7 @@
 // This file is auto-generated. See "generate_kernels.py"
 #pragma once
 #ifndef XFORMERS_MEM_EFF_ATTENTION_DISABLE_FORWARD
-#include "../kernel_forward.h"
+#include "../utils/kernel_forward.h"
 // ======== bf16 / sm80 ========
 __global__ void __launch_bounds__(
     AttentionKernel<cutlass::bfloat16_t, cutlass::arch::Sm80, true, 64, 64, 64, true, true>::kNumThreads,

@@ -7,11 +7,6 @@
  */
 #pragma once
 
-#ifdef HAS_PYTORCH
-#include <ATen/cuda/CUDAGeneratorImpl.h>
-#include <ATen/cuda/CUDAGraphsUtils.cuh>
-#endif
-
 #include <curand_kernel.h>
 #include <cmath>
 #include <vector>
@@ -40,13 +35,13 @@
 #include "cutlass/platform/platform.h"
 #include "cutlass/transform/threadblock/predicated_tile_iterator.h"
 #include "debug_utils.h"
-#include "epilogue/epilogue_pipelined.h"
-#include "epilogue/epilogue_rescale_output.h"
-#include "gemm/custom_mma.h"
-#include "gemm/find_default_mma.h"
-#include "gemm/mma_from_smem.h"
-#include "gemm_kernel_utils.h"
-#include "transform/tile_smem_loader.h"
+#include "../epilogue/epilogue_pipelined.h"
+#include "../epilogue/epilogue_rescale_output.h"
+#include "../gemm/custom_mma.h"
+#include "../gemm/find_default_mma.h"
+#include "../gemm/mma_from_smem.h"
+#include "../utils/gemm_kernel_utils.h"
+#include "../transform/tile_smem_loader.h"
 
 #include <inttypes.h>
 
@@ -154,7 +149,7 @@ struct AttentionKernel {
     int64_t* seqstart_q_ptr = nullptr;
     int64_t* seqstart_k_ptr = nullptr;
 
-    int32_t* seqlen_k_ptr = nullptr;
+    int64_t* seqlen_k_ptr = nullptr;
     uint32_t causal_diagonal_offset = 0;
 
     // Output tensors
@@ -197,6 +192,7 @@ struct AttentionKernel {
 
     int32_t num_batches = 0;
     int32_t num_heads = 0;
+    int32_t num_kv_repeats = 1;
 
     // dropout
     bool use_dropout = false;
@@ -212,6 +208,7 @@ struct AttentionKernel {
       auto batch_id = blockIdx.z;
       auto head_id = blockIdx.y;
       auto query_start = blockIdx.x * kQueriesPerBlock;
+      auto kv_head_id = head_id / num_kv_repeats;
 
       auto lse_dim = ceil_div((int32_t)num_queries, kAlignLSE) * kAlignLSE;
 
@@ -269,9 +266,9 @@ struct AttentionKernel {
 
       // Advance to the current batch / head / query_start
       query_ptr += (q_start + query_start) * q_strideM + head_id * q_strideH;
-      key_ptr += k_start * k_strideM + head_id * k_strideH;
+      key_ptr += k_start * k_strideM + kv_head_id * k_strideH;
 
-      value_ptr += k_start * v_strideM + head_id * v_strideH;
+      value_ptr += k_start * v_strideM + kv_head_id * v_strideH;
       output_ptr +=
           int64_t(q_start + query_start) * o_strideM + head_id * head_dim_value;
 
@@ -674,27 +671,6 @@ struct AttentionKernel {
               thread_id(),
               {0, col});
         };
-
-#ifdef HAS_PYTORCH
-    curandStatePhilox4_32_10_t curand_state_init;
-    if (kSupportsDropout && p.use_dropout) {
-      const auto seeds = at::cuda::philox::unpack(p.rng_engine_inputs);
-
-      // each element of the attention matrix P with shape
-      // (batch_sz, n_heads, n_queries, n_keys) is associated with a single
-      // offset in RNG sequence. we initialize the RNG state with offset that
-      // starts at the beginning of a (n_queries, n_keys) matrix for this
-      // block's batch_id and head_id
-      // initializing rng state is very expensive, so we run once per kernel,
-      // rather than once per iteration. each iteration takes a copy of the
-      // initialized RNG state and offsets it as needed.
-      curand_init(
-          std::get<0>(seeds),
-          0,
-          std::get<1>(seeds) + p.dropout_batch_head_rng_offset,
-          &curand_state_init);
-    }
-#endif
 
     // Iterate through keys
     for (int32_t iter_key_start = 0; iter_key_start < p.num_keys;
