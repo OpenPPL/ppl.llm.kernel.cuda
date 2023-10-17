@@ -55,7 +55,7 @@
 
 #include "../epilogue/epilogue_thread_apply_logsumexp.h"
 #include "../gemm/mma_accum_lambda_iterator.h"
-#include "../gemm_kernel_utils.h"
+#include "../utils/gemm_kernel_utils.h"
 #include "../iterators/default_warp_iterator_from_smem.h"
 #include "../iterators/make_residual_last.h"
 #include "../iterators/transpose_warp_iterator.h"

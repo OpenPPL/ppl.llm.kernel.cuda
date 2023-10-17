@@ -15,10 +15,10 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include "ppl/kernel/llm/cuda/pmx/column_parallel_linear.h"
+#include "ppl/kernel/llm/cuda/pmx/multi_head_cache_attention.h"
 #include "ppl/common/log.h"
 
-#include "../../../../../llm/xformer_fmha/xformer_fmha.h"
+#include "ppl/kernel/llm/cuda/xformer/fmha.h"
 #include "cudakernel/common/common.cuh"
 
 #include <cuda_fp16.h>
@@ -570,11 +570,7 @@ ppl::common::RetCode dynamic_batch_multi_head_cache_attention(
         return ppl::common::RC_UNSUPPORTED;
     }
 
-    const int64_t q_num = query_shape->GetDim(0);
-    const int64_t kv_num = current_key_shape->GetDim(0);
-
-    const int64_t decodeing_q_num = decoding_batches;
-    const int64_t prefill_qkv_num = q_num - decodeing_q_num;
+    const int64_t prefill_batches = batch - decoding_batches;
     const float attn_scale = float(1.0 / std::sqrt(float(head_dim)));
 
     const int64_t q_stride_s = query_shape->GetDim(1) * head_dim;
@@ -631,67 +627,79 @@ ppl::common::RetCode dynamic_batch_multi_head_cache_attention(
             (half*)scale});
     }
 
-    if(decodeing_q_num > 0) {
+    if(decoding_batches > 0) {
         constexpr int64_t WARP_SIZE = 32;
         constexpr int64_t TPB = 256;
-        constexpr int64_t MAX_SHM_SIZE = 48 * 1024;
+        const int64_t MAX_SHM_SIZE = device_prop.sharedMemPerBlockOptin;
+        const int64_t RAW_SHM_SIZE = 48 * 1024;
 
         constexpr int64_t reduce_shm_size = TPB / WARP_SIZE * sizeof(float);
         const int64_t logits_size = max(max_kvlen * sizeof(float), head_dim * sizeof(float));
+        const int64_t kernel_shm_size = reduce_shm_size + logits_size;
 
-        if (reduce_shm_size + logits_size <= MAX_SHM_SIZE) {
-            const dim3 grid_size = {(unsigned int)num_heads, (unsigned int)decodeing_q_num, 1};
-            switch (head_dim){
+        if (kernel_shm_size <= MAX_SHM_SIZE) {
+            auto kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<64, 4, 256, 8, true>;
+            switch (head_dim) {
                 case 64:
-                    dynamic_batching_decoding_cache_attention_fp16_kernel<64, 4, 256, 8, true>
-                    <<<grid_size, 256, logits_size, stream>>>(p);
+                    kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<64, 4, 256, 8, true>;
                     break;
                 case 96:
-                    dynamic_batching_decoding_cache_attention_fp16_kernel<96, 4, 256, 8, true>
-                    <<<grid_size, 256, logits_size, stream>>>(p);
+                    kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<96, 4, 256, 8, true>;
                     break;
                 case 128:
-                    dynamic_batching_decoding_cache_attention_fp16_kernel<128, 8, 256, 8, true>
-                    <<<grid_size, 256, logits_size, stream>>>(p);
+                    kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<128, 8, 256, 8, true>;;
                     break;
                 case 256:
-                    dynamic_batching_decoding_cache_attention_fp16_kernel<256, 16, 256, 8, true>
-                    <<<grid_size, 256, logits_size, stream>>>(p);
+                    kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<256, 16, 256, 8, true>;
                     break;
                 default:
                     LOG(ERROR) << "cache flash decoding attention do not support head dim " << head_dim;
                     return ppl::common::RC_UNSUPPORTED;
             }
+            if (kernel_shm_size > RAW_SHM_SIZE) {
+                auto cuda_err = cudaFuncSetAttribute(kernel_fn, cudaFuncAttributeMaxDynamicSharedMemorySize, kernel_shm_size);
+                if (cuda_err == cudaErrorInvalidValue) {
+                    LOG(ERROR) << "this gpu does not have enough shared-memory cache flash decoding attention requires";
+                    return ppl::common::RC_UNSUPPORTED;
+                }
+            }
+            const dim3 grid_size = {(unsigned int)num_heads, (unsigned int)decoding_batches, 1};
+            kernel_fn<<<grid_size, 256, kernel_shm_size, stream>>>(p);
         } else {
             LOG(ERROR) << "shm not enough, cache flash decoding attention is unsupported.";
             return ppl::common::RC_UNSUPPORTED;
         }
     }
 
-    if(prefill_qkv_num > 0) {
-        ppl::common::TensorShape prefill_query_shape(*query_shape);
-        ppl::common::TensorShape prefill_key_shape(*current_key_shape);
-        ppl::common::TensorShape prefill_seqstart_q_shape;
-
-        prefill_query_shape.Reshape({1, q_num, num_heads, head_dim});
-        prefill_key_shape.Reshape({1, kv_num, num_kv_heads, head_dim});
-        prefill_seqstart_q_shape.Reshape({batch + 1 - decodeing_q_num});
-
+    if (prefill_batches > 0) {
         const int64_t custom_mask_type = is_causal ? 1 : 0;
-        const void* prefill_seqstart_q = ((int64_t*)seqstarts) + decodeing_q_num;
+        const void* prefill_seqstart_q = ((int64_t*)seqstarts) + decoding_batches;
 
-        PPLCUDAFMHAForwardImp(device_prop, stream,
-            &prefill_query_shape, query,
-            &prefill_key_shape, current_key,
-            &prefill_key_shape, current_value,
-            nullptr, nullptr,
-            &prefill_seqstart_q_shape, prefill_seqstart_q,
-            &prefill_seqstart_q_shape, prefill_seqstart_q,
-            nullptr, nullptr,
-            max_seqlen, custom_mask_type, attn_scale,
-            &prefill_query_shape, output);
-
-        return ppl::common::RC_SUCCESS;
+        return llm::cuda::xformer::fmha(
+            stream,
+            device_prop,
+            query_shape->GetDataType(),
+            query,
+            current_key,
+            current_value,
+            nullptr,
+            prefill_seqstart_q,
+            prefill_seqstart_q,
+            prefill_batches,
+            0, q_stride_s, head_dim,
+            0, k_stride_s, head_dim,
+            0, v_stride_s, head_dim,
+            0, 0, 0,
+            o_stride_s,
+            max_seqlen,
+            max_kvlen,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            custom_mask_type,
+            attn_scale,
+            output
+        );
     } else {
         return ppl::common::RC_SUCCESS;
     }
