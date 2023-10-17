@@ -18,7 +18,7 @@
 #include "ppl/kernel/llm/cuda/pmx/multi_head_cache_attention.h"
 #include "ppl/common/log.h"
 
-#include "../xformer/fmha.h"
+#include "ppl/kernel/llm/cuda/xformer/fmha.h"
 #include "cudakernel/common/common.cuh"
 
 #include <cuda_fp16.h>

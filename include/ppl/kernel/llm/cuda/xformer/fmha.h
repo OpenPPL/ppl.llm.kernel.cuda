@@ -19,9 +19,6 @@
 #define __PPL_KERNEL_LLM_CUDA_XFORMER_FMHA_H__
 
 #include "ppl/kernel/llm/cuda/common/general_include.h"
-#include "utils/kernel_forward.h"
-
-#include <cuda_runtime.h>
 
 namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace xformer {
 
@@ -55,7 +52,7 @@ ppl::common::RetCode fmha(
     const int64_t num_kv_heads,
     const int64_t head_dim,
     const int64_t custom_mask_type,
-    const double attn_scale,
+    const float attn_scale,
     void* output);
 
 }}}}}
