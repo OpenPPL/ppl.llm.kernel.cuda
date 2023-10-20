@@ -232,23 +232,9 @@ ppl::common::RetCode gemm_i8i8i32(
             ++M_shift;
         M_aligned = 1 << (M_shift * 2);
 
-        int64_t K_shift = 0;
-        int64_t K_aligned = K;
-        while (K_aligned >>= 2)
-            ++K_shift;
-        K_aligned = 1 << (K_shift * 2);
-        K_aligned = std::max<int64_t>(K / 256 * 256, K_aligned);
-
-        int64_t N_shift = 0;
-        int64_t N_aligned = N;
-        while (N_aligned >>= 2)
-            ++N_shift;
-        N_aligned = 1 << (N_shift * 2);
-        N_aligned = std::max<int64_t>(N / 256 * 256, N_aligned);
-
-        CUBLAS_CHECK_RC(cublasLtMatrixLayoutInit(Adesc, abType, cublas_transa == CUBLAS_OP_N ? K_aligned : M_aligned, cublas_transa == CUBLAS_OP_N ? M_aligned : K_aligned, lda));
-        CUBLAS_CHECK_RC(cublasLtMatrixLayoutInit(Bdesc, abType, cublas_transb == CUBLAS_OP_N ? N_aligned : K_aligned, cublas_transb == CUBLAS_OP_N ? K_aligned : N_aligned, ldb));
-        CUBLAS_CHECK_RC(cublasLtMatrixLayoutInit(Cdesc, cType, N_aligned, M_aligned, ldc));
+        CUBLAS_CHECK_RC(cublasLtMatrixLayoutInit(Adesc, abType, cublas_transa == CUBLAS_OP_N ? K : M_aligned, cublas_transa == CUBLAS_OP_N ? M_aligned : K, lda));
+        CUBLAS_CHECK_RC(cublasLtMatrixLayoutInit(Bdesc, abType, cublas_transb == CUBLAS_OP_N ? N : K, cublas_transb == CUBLAS_OP_N ? K : N, ldb));
+        CUBLAS_CHECK_RC(cublasLtMatrixLayoutInit(Cdesc, cType, N, M_aligned, ldc));
 
         cublaslt_algo_cache_idx_t cache_idx{
             create_cublas_matmul_desc(operationDesc),

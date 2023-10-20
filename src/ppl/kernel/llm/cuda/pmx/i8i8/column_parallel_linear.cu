@@ -42,7 +42,7 @@ ppl::common::RetCode column_parallel_linear(
     const float down_scale_N,
     const int64_t in_features,
     const int64_t out_features,
-    const bool use_4r4_weight,
+    const matrix_layout_t weight_layout,
     ppl::common::NcclParam* nccl_param,
     const bool gather_output,
     void* gather_buffer,
@@ -63,6 +63,17 @@ ppl::common::RetCode column_parallel_linear(
         return ppl::common::RC_UNSUPPORTED;
     }
 
+    if (weight_layout != MATRIX_LAYOUT_ROW_MAJOR &&
+        weight_layout != MATRIX_LAYOUT_COL4_4R2_8C &&
+        weight_layout != MATRIX_LAYOUT_COL32_2R_4R4)
+    {
+        LOG(ERROR) << "unsupported weight layout:" << (int32_t)weight_layout;
+        return ppl::common::RC_UNSUPPORTED;
+    }
+
+    const bool use_col32_gemm = weight_layout != MATRIX_LAYOUT_ROW_MAJOR;
+    const bool use_4r4_weight = weight_layout == MATRIX_LAYOUT_COL32_2R_4R4;
+
     const int64_t M = input_shape->CalcElementsToDimensionExcludingPadding(input_shape->GetDimCount() - 1);
     const int64_t Nw = out_features / nccl_param->size;
     const int64_t K = in_features;
@@ -81,41 +92,43 @@ ppl::common::RetCode column_parallel_linear(
 
     // LOG(ERROR) << "M" << M << ", N" << Nw << ", K" << K;
 
-    // status = ppl::kernel::llm::cuda::cublas::gemm_i8i8i32(
-    //     stream,
-    //     cublaslt_handle,
-    //     algo,
-    //     false,
-    //     K,
-    //     input_shape->GetDataType(),
-    //     input,
-    //     true,
-    //     K,
-    //     weight_shape->GetDataType(),
-    //     weight,
-    //     nullptr,
-    //     M,
-    //     Nw,
-    //     K,
-    //     1,
-    //     0,
-    //     cublas_workspace_size,
-    //     cublas_workspace,
-    //     cublas_algo_cache,
-    //     Nw,
-    //     output_shape->GetDataType(),
-    //     gemm_output);
-
-    status = ppl::kernel::llm::cuda::cublas::gemm_i8i8i32_col32(
-        stream,
-        cublaslt_handle,
-        input,
-        weight,
-        M,
-        Nw,
-        K,
-        use_4r4_weight,
-        gemm_output);
+    if (!use_col32_gemm) {
+        status = ppl::kernel::llm::cuda::cublas::gemm_i8i8i32(
+            stream,
+            cublaslt_handle,
+            algo,
+            false,
+            K,
+            input_shape->GetDataType(),
+            input,
+            true,
+            K,
+            weight_shape->GetDataType(),
+            weight,
+            nullptr,
+            M,
+            Nw,
+            K,
+            1,
+            0,
+            cublas_workspace_size,
+            cublas_workspace,
+            cublas_algo_cache,
+            Nw,
+            ppl::common::DATATYPE_INT32,
+            gemm_output);
+    } else {
+        status = ppl::kernel::llm::cuda::cublas::gemm_i8i8i32_col32(
+            stream,
+            cublaslt_handle,
+            input,
+            weight,
+            M,
+            Nw,
+            K,
+            use_4r4_weight,
+            gemm_output);
+    }
 
     if (ppl::common::RC_SUCCESS != status)
         return status;
@@ -131,7 +144,11 @@ ppl::common::RetCode column_parallel_linear(
             Nw,
             down_scale_M,
             down_scale_N,
-            ppl::kernel::llm::cuda::MATRIX_LAYOUT_COL32,
+            (
+                use_col32_gemm ?
+                MATRIX_LAYOUT_COL32 :
+                MATRIX_LAYOUT_ROW_MAJOR
+            ),
             dequant_output
         );
 
