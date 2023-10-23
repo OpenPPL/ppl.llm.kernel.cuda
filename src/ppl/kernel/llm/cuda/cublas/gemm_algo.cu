@@ -35,6 +35,7 @@ namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace cu
 std::pair<ppl::common::RetCode, cublasLtMatmulAlgo_t> cublaslt_find_best_algo(
     const cudaStream_t     stream,
     const cublasLtHandle_t&lightHandle,
+    const std::vector<int>&banned_algo_ids,
     cublasLtMatmulDesc_t   computeDesc,
     const void*            alpha,
     const void*            A,
@@ -84,6 +85,9 @@ std::pair<ppl::common::RetCode, cublasLtMatmulAlgo_t> cublaslt_find_best_algo(
         cublasLtMatmulAlgo_t algo = heuristic.algo;
         int32_t algo_id;
         cublasLtMatmulAlgoConfigGetAttribute(&algo, CUBLASLT_ALGO_CONFIG_ID, &algo_id, sizeof(algo_id), &returnSize);
+
+        if (std::find(banned_algo_ids.begin(), banned_algo_ids.end(), algo_id) != banned_algo_ids.end())
+            continue;
 
         cudaEvent_t start_event, stop_event;
         cudaEventCreate(&start_event);

@@ -259,10 +259,13 @@ ppl::common::RetCode gemm_i8i8i32(
 
         auto algo_cache_it = algo_cache->find(cache_idx);
         if (algo_cache_it == algo_cache->end()) {
+            LOG(DEBUG) << "cublas finding algo, (M,N,K) = (" << M << "," << N << "," << K <<"), aligned to ("
+                << M_aligned << "," << N_aligned << "," << K_aligned <<")";
             auto result =
                 cublaslt_find_best_algo(
                     stream,
                     cublaslt_handle,
+                    {20}, // ban this algo because it will give "Invalid __global__ read"
                     operationDesc,
                     (const void*)(&alpha),
                     B,

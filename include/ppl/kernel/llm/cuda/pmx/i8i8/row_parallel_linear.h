@@ -46,7 +46,7 @@ ppl::common::RetCode row_parallel_linear(
     const float down_scale_N,
     const int64_t in_features,
     const int64_t out_features,
-    const bool use_4r4_weight,
+    const matrix_layout_t weight_layout,
     ppl::common::NcclParam* nccl_param,
     const bool input_is_parallel,
     void* split_buffer,

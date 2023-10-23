@@ -110,6 +110,7 @@ static inline cublaslt_matrix_layout_t create_cublas_matrix_layout(cublasLtMatri
 std::pair<ppl::common::RetCode, cublasLtMatmulAlgo_t> cublaslt_find_best_algo(
     const cudaStream_t     stream,
     const cublasLtHandle_t&lightHandle,
+    const std::vector<int>&banned_algo_ids, // some algo does invalid read in my unittest, what are you doing nvidia?
     cublasLtMatmulDesc_t   computeDesc,
     const void*            alpha,
     const void*            A,
