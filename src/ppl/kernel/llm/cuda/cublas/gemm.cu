@@ -237,14 +237,14 @@ ppl::common::RetCode gemm_i8i8i32(
         while (K_aligned >>= 2)
             ++K_shift;
         K_aligned = 1 << (K_shift * 2);
-        K_aligned = std::max<int64_t>(K / 2048 * 2048, K_aligned);
+        K_aligned = std::max<int64_t>(K / 256 * 256, K_aligned);
 
         int64_t N_shift = 0;
         int64_t N_aligned = N;
         while (N_aligned >>= 2)
             ++N_shift;
         N_aligned = 1 << (N_shift * 2);
-        N_aligned = std::max<int64_t>(N / 2048 * 2048, N_aligned);
+        N_aligned = std::max<int64_t>(N / 256 * 256, N_aligned);
 
         CUBLAS_CHECK_RC(cublasLtMatrixLayoutInit(Adesc, abType, cublas_transa == CUBLAS_OP_N ? K_aligned : M_aligned, cublas_transa == CUBLAS_OP_N ? M_aligned : K_aligned, lda));
         CUBLAS_CHECK_RC(cublasLtMatrixLayoutInit(Bdesc, abType, cublas_transb == CUBLAS_OP_N ? N_aligned : K_aligned, cublas_transb == CUBLAS_OP_N ? K_aligned : N_aligned, ldb));
