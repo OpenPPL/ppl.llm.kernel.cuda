@@ -265,6 +265,7 @@ ppl::common::RetCode gemm_i8i8i32(
                 cublaslt_find_best_algo(
                     stream,
                     cublaslt_handle,
+                    {20}, // ban this algo because it will give "Invalid __global__ read"
                     operationDesc,
                     (const void*)(&alpha),
                     B,
