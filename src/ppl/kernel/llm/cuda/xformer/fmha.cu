@@ -25,51 +25,9 @@
 
 namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace xformer {
 
-ppl::common::RetCode fmha(
-    const cudaStream_t stream,
-    const cudaDeviceProp& device_prop,
-    const ppl::common::datatype_t datatype,
-    const void* query,
-    const void* key,
-    const void* value,
-    const void* optional_attn_mask,
-    const void* optional_seqstart_q, // (B + 1)
-    const void* optional_seqstart_k, // (B + 1)
-    const int64_t batch,
-    const int64_t query_stride_b, // 0 if dynamic batch
-    const int64_t query_stride_s,
-    const int64_t query_stride_h,
-    const int64_t key_stride_b, // 0 if dynamic batch
-    const int64_t key_stride_s,
-    const int64_t key_stride_h,
-    const int64_t value_stride_b, // 0 if dynamic batch
-    const int64_t value_stride_s,
-    const int64_t value_stride_h,
-    const int64_t mask_stride_b, // 0 if dynamic batch
-    const int64_t mask_stride_s,
-    const int64_t mask_stride_h,
-    const int64_t output_stride_s,
-    const int64_t max_seqlen,
-    const int64_t max_kvlen, // unused if dynamic batch
-    const int64_t num_heads,
-    const int64_t num_kv_heads,
-    const int64_t head_dim,
-    const int64_t custom_mask_type,
-    const float attn_scale,
-    void* output)
-{
-    if (datatype != ppl::common::DATATYPE_FLOAT16) {
-        LOG(ERROR) << "only support fp16";
-        return ppl::common::RC_UNSUPPORTED;
-    }
-
-    const int compute_capability = device_prop.major * 10 + device_prop.minor;
-    bool kernel_launched = false;
-    const char* kernel_miss_reason = nullptr;
-    const auto max_shmem = device_prop.sharedMemPerBlockOptin;
-
-    // launchKernel lambda func
-    auto launch_kernel = [&](auto _k, auto kernel_fn) { // _k is struct AttentionKernel in kernel_forward.h
+struct FmhaKernelHelper {
+    template<typename KT, typename FT>
+    void operator()(KT _k, FT kernel_fn) {
         using Kernel = decltype(_k);
         using scalar_t = typename Kernel::scalar_t;
         (void)_k;
@@ -166,9 +124,128 @@ ppl::common::RetCode fmha(
 
         kernel_fn<<<p.getBlocksGrid(), p.getThreadsGrid(), smem_bytes, stream>>>(p);
         kernel_launched = true;
+    }
+
+    cudaStream_t stream;
+    const void* query;
+    const void* key;
+    const void* value;
+    const void* optional_attn_mask;
+    const void* optional_seqstart_q; // (B + 1)
+    const void* optional_seqstart_k; // (B + 1)
+    int64_t batch;
+    int64_t query_stride_b; // 0 if dynamic batch
+    int64_t query_stride_s;
+    int64_t query_stride_h;
+    int64_t key_stride_b; // 0 if dynamic batch
+    int64_t key_stride_s;
+    int64_t key_stride_h;
+    int64_t value_stride_b; // 0 if dynamic batch
+    int64_t value_stride_s;
+    int64_t value_stride_h;
+    int64_t mask_stride_b; // 0 if dynamic batch
+    int64_t mask_stride_s;
+    int64_t mask_stride_h;
+    int64_t output_stride_s;
+    int64_t max_seqlen;
+    int64_t max_kvlen; // unused if dynamic batch
+    int64_t num_heads;
+    int64_t num_kv_heads;
+    int64_t head_dim;
+    int64_t custom_mask_type;
+    float attn_scale;
+    void* output;
+
+    size_t max_shmem;
+    int compute_capability;
+
+    bool &kernel_launched;
+    const char *&kernel_miss_reason;
+};
+
+ppl::common::RetCode fmha(
+    const cudaStream_t stream,
+    const cudaDeviceProp& device_prop,
+    const ppl::common::datatype_t datatype,
+    const void* query,
+    const void* key,
+    const void* value,
+    const void* optional_attn_mask,
+    const void* optional_seqstart_q, // (B + 1)
+    const void* optional_seqstart_k, // (B + 1)
+    const int64_t batch,
+    const int64_t query_stride_b, // 0 if dynamic batch
+    const int64_t query_stride_s,
+    const int64_t query_stride_h,
+    const int64_t key_stride_b, // 0 if dynamic batch
+    const int64_t key_stride_s,
+    const int64_t key_stride_h,
+    const int64_t value_stride_b, // 0 if dynamic batch
+    const int64_t value_stride_s,
+    const int64_t value_stride_h,
+    const int64_t mask_stride_b, // 0 if dynamic batch
+    const int64_t mask_stride_s,
+    const int64_t mask_stride_h,
+    const int64_t output_stride_s,
+    const int64_t max_seqlen,
+    const int64_t max_kvlen, // unused if dynamic batch
+    const int64_t num_heads,
+    const int64_t num_kv_heads,
+    const int64_t head_dim,
+    const int64_t custom_mask_type,
+    const float attn_scale,
+    void* output)
+{
+    if (datatype != ppl::common::DATATYPE_FLOAT16) {
+        LOG(ERROR) << "only support fp16";
+        return ppl::common::RC_UNSUPPORTED;
+    }
+
+    bool kernel_launched = false;
+    const char *kernel_miss_reason = nullptr;
+
+    const int compute_capability = device_prop.major * 10 + device_prop.minor;
+    const auto max_shmem = device_prop.sharedMemPerBlockOptin;
+
+    FmhaKernelHelper hlp = {
+        stream,
+        query,
+        key,
+        value,
+        optional_attn_mask,
+        optional_seqstart_q, // (B + 1)
+        optional_seqstart_k, // (B + 1)
+        batch,
+        query_stride_b, // 0 if dynamic batch
+        query_stride_s,
+        query_stride_h,
+        key_stride_b, // 0 if dynamic batch
+        key_stride_s,
+        key_stride_h,
+        value_stride_b, // 0 if dynamic batch
+        value_stride_s,
+        value_stride_h,
+        mask_stride_b, // 0 if dynamic batch
+        mask_stride_s,
+        mask_stride_h,
+        output_stride_s,
+        max_seqlen,
+        max_kvlen, // unused if dynamic batch
+        num_heads,
+        num_kv_heads,
+        head_dim,
+        custom_mask_type,
+        attn_scale,
+        output,
+        // other param
+        max_shmem,
+        compute_capability,
+        // ret param
+        kernel_launched,
+        kernel_miss_reason,
     };
 
-    dispatch_cutlassF<::cutlass::half_t>(launch_kernel, compute_capability);
+    dispatch_cutlassF<::cutlass::half_t>(hlp, compute_capability);
 
     if (!kernel_launched) {
         LOG(ERROR) << "xformer kernel not launched, reason: " << kernel_miss_reason;
