@@ -28,86 +28,97 @@
 
 namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace cublas {
 
-using cublaslt_matmul_desc_t = std::array<uint64_t, 12>;
-using cublaslt_matrix_layout_t = std::tuple<
-    cudaDataType_t, cublasLtOrder_t, uint64_t, uint64_t>;
-struct cublaslt_algo_cache_idx_t {
-    cublaslt_matmul_desc_t matmul_desc;
-    std::array<cublaslt_matrix_layout_t, 4> matrix_descs;
-};
+struct MatmulDesc {
+    cublasOperation_t transa;
+    cublasOperation_t transb;
 
-struct cublaslt_algo_cache_idx_hash {
-    std::size_t operator()(const cublaslt_algo_cache_idx_t& k) const {
-        return    std::hash<uint64_t>()(k.matmul_desc[0])
-               ^ (std::hash<uint64_t>()(k.matmul_desc[1]) << 1)
-               ^ (std::hash<uint64_t>()(k.matmul_desc[2]) << 2)
-               ^ (std::hash<uint64_t>()(k.matmul_desc[3]) << 3)
-               ^ (std::hash<uint64_t>()(k.matmul_desc[4]) << 4)
-               ^ (std::hash<uint64_t>()(k.matmul_desc[5]) << 5)
-               ^ (std::hash<uint64_t>()(k.matmul_desc[6]) << 6)
-               ^ (std::hash<uint64_t>()(k.matmul_desc[7]) << 7)
-               ^ (std::hash<uint64_t>()(k.matmul_desc[8]) << 8)
-               ^ (std::hash<uint64_t>()(k.matmul_desc[9]) << 9)
-               ^ (std::hash<uint64_t>()(k.matmul_desc[10]) << 10)
-               ^ (std::hash<uint64_t>()(k.matmul_desc[11]) << 11)
-               ^ (std::hash<int>()(std::get<0>(k.matrix_descs[0])) << 12)
-               ^ (std::hash<int>()(std::get<1>(k.matrix_descs[0])) << 13)
-               ^ (std::hash<uint64_t>()(std::get<2>(k.matrix_descs[0])) << 14)
-               ^ (std::hash<uint64_t>()(std::get<3>(k.matrix_descs[0])) << 15)
-               ^ (std::hash<int>()(std::get<0>(k.matrix_descs[1])) << 16)
-               ^ (std::hash<int>()(std::get<1>(k.matrix_descs[1])) << 17)
-               ^ (std::hash<uint64_t>()(std::get<2>(k.matrix_descs[1])) << 18)
-               ^ (std::hash<uint64_t>()(std::get<3>(k.matrix_descs[1])) << 19)
-               ^ (std::hash<int>()(std::get<0>(k.matrix_descs[2])) << 20)
-               ^ (std::hash<int>()(std::get<1>(k.matrix_descs[2])) << 21)
-               ^ (std::hash<uint64_t>()(std::get<2>(k.matrix_descs[2])) << 22)
-               ^ (std::hash<uint64_t>()(std::get<3>(k.matrix_descs[2])) << 23)
-               ^ (std::hash<int>()(std::get<0>(k.matrix_descs[3])) << 24)
-               ^ (std::hash<int>()(std::get<1>(k.matrix_descs[3])) << 25)
-               ^ (std::hash<uint64_t>()(std::get<2>(k.matrix_descs[3])) << 26)
-               ^ (std::hash<uint64_t>()(std::get<3>(k.matrix_descs[3])) << 27);
+    bool operator==(const MatmulDesc &other) const {
+        return transa == other.transa
+            && transb == other.transb;
     }
 };
 
-struct cublaslt_algo_cache_idx_equal {
-    bool operator()(const cublaslt_algo_cache_idx_t& a, const cublaslt_algo_cache_idx_t& b) const {
-        return a.matmul_desc == b.matmul_desc && a.matrix_descs == b.matrix_descs;
+struct MatrixLayout {
+    cudaDataType_t datatype;
+    cublasLtOrder_t layout;
+    uint64_t rows;
+    uint64_t cols;
+
+    bool operator==(const MatrixLayout &other) const {
+        return datatype == other.datatype
+            && layout == other.layout
+            && rows == other.rows
+            && cols == other.cols;
     }
 };
 
-using cublaslt_algo_cache_t = std::unordered_map<
-    cublaslt_algo_cache_idx_t,
+struct AlgoCacheIndex {
+    MatmulDesc matmul_desc;
+    std::array<MatrixLayout, 4> matrix_descs;
+
+    bool operator==(const AlgoCacheIndex &other) const {
+        return matmul_desc == other.matmul_desc
+            && matrix_descs == other.matrix_descs;
+    }
+};
+
+struct AlgoCacheIndexHash {
+    std::size_t operator()(const AlgoCacheIndex& k) const {
+        return    std::hash<int>()(k.matmul_desc.transa)
+               ^ (std::hash<int>()(k.matmul_desc.transb) << 1)
+               ^ (std::hash<int>()(k.matrix_descs[0].datatype) << 2)
+               ^ (std::hash<int>()(k.matrix_descs[0].layout) << 3)
+               ^ (std::hash<uint64_t>()(k.matrix_descs[0].rows) << 4)
+               ^ (std::hash<uint64_t>()(k.matrix_descs[0].cols) << 5)
+               ^ (std::hash<int>()(k.matrix_descs[1].datatype) << 6)
+               ^ (std::hash<int>()(k.matrix_descs[1].layout) << 7)
+               ^ (std::hash<uint64_t>()(k.matrix_descs[1].rows) << 8)
+               ^ (std::hash<uint64_t>()(k.matrix_descs[1].cols) << 9)
+               ^ (std::hash<int>()(k.matrix_descs[2].datatype) << 10)
+               ^ (std::hash<int>()(k.matrix_descs[2].layout) << 11)
+               ^ (std::hash<uint64_t>()(k.matrix_descs[2].rows) << 12)
+               ^ (std::hash<uint64_t>()(k.matrix_descs[2].cols) << 13)
+               ^ (std::hash<int>()(k.matrix_descs[3].datatype) << 14)
+               ^ (std::hash<int>()(k.matrix_descs[3].layout) << 15)
+               ^ (std::hash<uint64_t>()(k.matrix_descs[3].rows) << 16)
+               ^ (std::hash<uint64_t>()(k.matrix_descs[3].cols) << 17);
+    }
+};
+
+using AlgoCache = std::unordered_map<
+    AlgoCacheIndex,
     cublasLtMatmulAlgo_t,
-    cublaslt_algo_cache_idx_hash,
-    cublaslt_algo_cache_idx_equal>;
+    AlgoCacheIndexHash>;
 
-static inline cublaslt_matmul_desc_t create_cublas_matmul_desc(cublasLtMatmulDesc_t Mdesc) {
-    cublaslt_matmul_desc_t m_desc = {
-        Mdesc->data[0], Mdesc->data[1], Mdesc->data[2], Mdesc->data[3], 
-        Mdesc->data[4], Mdesc->data[5], Mdesc->data[6], Mdesc->data[7], 
-        Mdesc->data[8], Mdesc->data[9], Mdesc->data[10], Mdesc->data[11], 
-    };
+static inline MatmulDesc convert_matmul_desc(cublasLtMatmulDesc_t Mdesc) {
+    size_t       return_size;
+    MatmulDesc m_desc;
+
+    cublasLtMatmulDescGetAttribute(
+        Mdesc, CUBLASLT_MATMUL_DESC_TRANSA, &m_desc.transa, sizeof(m_desc.transa), &return_size);
+    cublasLtMatmulDescGetAttribute(
+        Mdesc, CUBLASLT_MATMUL_DESC_TRANSB, &m_desc.transb, sizeof(m_desc.transb), &return_size);
 
     return m_desc;
 }
 
-static inline cublaslt_matrix_layout_t create_cublas_matrix_layout(cublasLtMatrixLayout_t Mdesc) {
+static inline MatrixLayout convert_matrix_layout(cublasLtMatrixLayout_t Mdesc) {
     size_t       return_size;
-    cublaslt_matrix_layout_t m_layout;
+    MatrixLayout m_layout;
 
     cublasLtMatrixLayoutGetAttribute(
-        Mdesc, CUBLASLT_MATRIX_LAYOUT_TYPE, &std::get<0>(m_layout), sizeof(std::get<0>(m_layout)), &return_size);
+        Mdesc, CUBLASLT_MATRIX_LAYOUT_TYPE, &m_layout.datatype, sizeof(m_layout.datatype), &return_size);
     cublasLtMatrixLayoutGetAttribute(
-        Mdesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &std::get<1>(m_layout), sizeof(std::get<1>(m_layout)), &return_size);
+        Mdesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &m_layout.layout, sizeof(m_layout.layout), &return_size);
     cublasLtMatrixLayoutGetAttribute(
-        Mdesc, CUBLASLT_MATRIX_LAYOUT_ROWS, &std::get<2>(m_layout), sizeof(std::get<2>(m_layout)), &return_size);
+        Mdesc, CUBLASLT_MATRIX_LAYOUT_ROWS, &m_layout.rows, sizeof(m_layout.rows), &return_size);
     cublasLtMatrixLayoutGetAttribute(
-        Mdesc, CUBLASLT_MATRIX_LAYOUT_COLS, &std::get<3>(m_layout), sizeof(std::get<3>(m_layout)), &return_size);
+        Mdesc, CUBLASLT_MATRIX_LAYOUT_COLS, &m_layout.cols, sizeof(m_layout.cols), &return_size);
 
     return m_layout;
 }
 
-std::pair<ppl::common::RetCode, cublasLtMatmulAlgo_t> cublaslt_find_best_algo(
+std::pair<ppl::common::RetCode, cublasLtMatmulAlgo_t> find_best_algo(
     const cudaStream_t     stream,
     const cublasLtHandle_t&lightHandle,
     const std::vector<int>&banned_algo_ids, // some algo does invalid read in my unittest, what are you doing nvidia?
