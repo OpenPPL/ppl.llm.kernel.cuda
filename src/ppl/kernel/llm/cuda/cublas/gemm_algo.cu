@@ -32,7 +32,7 @@ namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace cu
         } \
     } while (0)
 
-std::pair<ppl::common::RetCode, cublasLtMatmulAlgo_t> cublaslt_find_best_algo(
+std::pair<ppl::common::RetCode, cublasLtMatmulAlgo_t> find_best_algo(
     const cudaStream_t     stream,
     const cublasLtHandle_t&lightHandle,
     const std::vector<int>&banned_algo_ids,

@@ -73,7 +73,7 @@ ppl::common::RetCode gemm_i8i8i32(
     const int32_t beta, // int32-C need
     const int64_t workspace_size,
     void* workspace,
-    cublaslt_algo_cache_t* algo_cache,
+    AlgoCache* algo_cache,
     const int64_t ldc, // N
     const ppl::common::datatype_t typec, // int32
     void* C); // int32
