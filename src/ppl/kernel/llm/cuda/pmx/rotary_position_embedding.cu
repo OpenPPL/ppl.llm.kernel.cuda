@@ -27,7 +27,7 @@ namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pm
 /**
  * Rotary Embedding Cuda impl.
  *
- * @param dim_dix: Represents the position (offset) of the current element in the hidden_dimension.
+ * @param dim_idx: Represents the position (offset) of the current element in the hidden_dimension.
  * @param pos_idx: Represents the position (offset) of the current element in the sequence position.
 
  * @param head_dim: Total size of hidden_dimension.
@@ -35,7 +35,7 @@ namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pm
  */
 inline __device__
 float2 rotary_position_embedding_coeff(
-    const int64_t dim_dix, 
+    const int64_t dim_idx, 
     const int64_t pos_idx,
     const int64_t head_dim,
     const float theta)
@@ -43,7 +43,7 @@ float2 rotary_position_embedding_coeff(
     // fp16 does not have __sincosf instruction.
     // So we have only fp32 implementation of Rotary Embedding.
     float2 ret = {0.0f, 0.0f};
-    const float freq = 1.0f / __powf(theta, (dim_dix / (float)head_dim)) * pos_idx;
+    const float freq = 1.0f / __powf(theta, (dim_idx / (float)head_dim)) * pos_idx;
     __sincosf(freq, &ret.y, &ret.x);
     return ret;
 }
@@ -80,7 +80,7 @@ void rotary_position_embedding_kernel(
 
     if (tid < head_dim * num_heads) {
         const int64_t head_idx = tid / head_dim;
-        const int64_t dim_dix = tid % head_dim;
+        const int64_t dim_idx = tid % head_dim;
         const int64_t pos_idx = _start_pos + blockIdx.y;
 
         const int64_t token_idx = (blockIdx.x * seqlen + blockIdx.y);
@@ -89,7 +89,7 @@ void rotary_position_embedding_kernel(
         const int64_t rq_idx = token_idx * rotated_query_stride_s + tid;
         const int64_t rk_idx = token_idx * rotated_key_stride_s + tid;
 
-        if (dim_dix >= rotary_dim) {
+        if (dim_idx >= rotary_dim) {
             rotated_query[rq_idx] = query[q_idx];
             if (head_idx < num_key_heads)
                 rotated_key[rk_idx] = key[k_idx];
@@ -97,7 +97,7 @@ void rotary_position_embedding_kernel(
             const float2 q = __half22float2(query[q_idx]);
 
             const float2 b = rotary_position_embedding_coeff(
-                dim_dix, pos_idx, head_dim, theta);
+                dim_idx, pos_idx, head_dim, theta);
 
             rotated_query[rq_idx] = {
                 __float2half(q.x * b.x - q.y * b.y),
@@ -238,11 +238,11 @@ void dynamic_batching_rotary_position_embedding_kernel(
             auto rq_ptr = p.rotated_query + token_idx * p.rotated_query_stride_s;
             auto rk_ptr = p.rotated_key + token_idx * p.rotated_key_stride_s;
 
-        
-            const int64_t head_idx = tid / p.head_dim;
-            const int64_t dim_dix = tid % p.head_dim;
 
-            if (dim_dix >= p.rotary_dim) {
+            const int64_t head_idx = tid / p.head_dim;
+            const int64_t dim_idx = tid % p.head_dim;
+
+            if (dim_idx >= p.rotary_dim) {
                 rq_ptr[tid] = q_ptr[tid];
                 if (head_idx < p.num_key_heads)
                     rk_ptr[tid] = k_ptr[tid];
@@ -250,7 +250,7 @@ void dynamic_batching_rotary_position_embedding_kernel(
                 const float2 q = __half22float2(q_ptr[tid]);
 
                 const float2 b = rotary_position_embedding_coeff(
-                    dim_dix, pos_idx, p.head_dim, p.theta);
+                    dim_idx, pos_idx, p.head_dim, p.theta);
 
                 rq_ptr[tid] = {
                     __float2half(q.x * b.x - q.y * b.y),
