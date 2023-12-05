@@ -35,27 +35,46 @@ void minmax_quantize_fp16_kernel(
     half* scale_output // [batch]
 )
 {
-    constexpr int32_t WPT      = TPB / 32; // warp per thread block
-    const int64_t batch_id     = blockIdx.x;
-    const int64_t batch_offset = batch_id * quant_dim;
+    constexpr int32_t VPT       = 16;
+    constexpr int32_t V8PT      = VPT / sizeof(int8_t);
+    constexpr int32_t V16PT     = VPT / sizeof(half);
+    constexpr int32_t WPT       = TPB / 32; // warp per thread block
+    const int64_t batch_id      = blockIdx.x;
+    const int64_t batch_offset  = batch_id * quant_dim;
     __shared__ float red_smem[WPT];
 
     float local_max = 0.0f;
-    for(int64_t i = threadIdx.x; i < quant_dim; i += TPB){
-        float value = __half2float(input[batch_offset + i]);
-        local_max = max(abs(value), local_max);
+    for (int64_t idx = threadIdx.x * V16PT; idx < quant_dim; idx += TPB * V16PT) {
+        half local_in[V16PT];
+        copy<VPT>(&input[batch_offset + idx], local_in);
+
+        #pragma unroll
+        for (int32_t vidx = 0; vidx < V16PT; vidx += 1) {
+            float value = __half2float(local_in[vidx]);
+            local_max = fmax(fabs(value), local_max);
+        }
     }
-    local_max = BLOCK_REDUCE_MAX<WPT>(local_max, red_smem);
-    float scale = MIN_MAX_RANGE_TO_SCALE(local_max);
+    local_max = block_reduce_max<WPT>(local_max, red_smem);
+    float scale = min_max_range_to_scale(local_max, INT8_QLEVEL);
 
     MatrixLayoutHelper<TO_LAYOUT> idx_hlp;
     idx_hlp.Init(batch, quant_dim);
 
-    for(int64_t i = threadIdx.x; i < quant_dim; i += TPB){
-        float fp_value = __half2float(input[batch_offset + i]);
-        output[idx_hlp.GetOffset(batch_id, i)] = (int8_t)__float2int_rn(fp_value / scale);
+    for (int64_t idx = threadIdx.x * V8PT; idx < quant_dim; idx += TPB * V8PT) {
+        half local_in[V8PT];
+        int8_t local_out[V8PT];
+        copy<VPT>(&input[batch_offset + idx], local_in);
+        copy<VPT>(&input[batch_offset + idx + V16PT], &local_in[V16PT]);
+
+        #pragma unroll
+        for (int32_t vidx = 0; vidx < V8PT; vidx += 1) {
+            float fp_value = __half2float(local_in[vidx]);
+            local_out[vidx] = (int8_t)__float2int_rn(fp_value / scale);
+        }
+        copy<VPT>(local_out, &output[idx_hlp.GetOffset(batch_id, idx)]);
     }
-    if(threadIdx.x == 0){
+
+    if (threadIdx.x == 0) {
         scale_output[batch_id] = __float2half(scale * up_scale);
     }
 }
@@ -92,12 +111,6 @@ ppl::common::RetCode minmax_quantize_fp16(
         );
     } else if (to_layout == MATRIX_LAYOUT_COL32_2R_4R4) {
         minmax_quantize_fp16_kernel<TPB, MATRIX_LAYOUT_COL32_2R_4R4>
-        <<<batch, TPB, 0, stream>>>(
-            (const half*)input, batch, quant_dim,
-            up_scale, (int8_t*)quantized, (half*)scale
-        );
-    } else if (to_layout == MATRIX_LAYOUT_COL4_4R2_8C) {
-        minmax_quantize_fp16_kernel<TPB, MATRIX_LAYOUT_COL4_4R2_8C>
         <<<batch, TPB, 0, stream>>>(
             (const half*)input, batch, quant_dim,
             up_scale, (int8_t*)quantized, (half*)scale
@@ -221,4 +234,3 @@ ppl::common::RetCode minmax_dequantize_fp16(
 }
 
 }}}}}}
-
