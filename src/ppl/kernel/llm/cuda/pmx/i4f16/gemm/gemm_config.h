@@ -15,51 +15,37 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include "ppl/kernel/llm/cuda/pmx/i4f16/gemm.h"
-
-#include "ppl/common/log.h"
-
-#include "gemm/gemm_api.h"
+#pragma once
 
 namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pmx { namespace i4f16 {
 
-void* create_gemm_handle() {
-    return (void*)(new GemmAPI());
-}
+enum class TileConfig {
+    Undefined,
+    ChooseWithHeuristic,
 
-void destory_gemm_handle(void* handle) {
-    delete ((GemmAPI*)handle);
-}
+    CtaShape16x64x64_WarpShape16x16x64,
+    CtaShape16x16x512_WarpShape16x16x128,
+    CtaShape16x32x256_WarpShape16x16x128,
+    CtaShape16x64x256_WarpShape16x16x128,
+    CtaShape16x64x128_WarpShape16x16x128,
 
-ppl::common::RetCode gemm(
-    const cudaStream_t stream,
-    const void* handle,
-    const void* input,
-    const void* weight,
-    const void* weight_scale,
-    const void* bias,
-    const int64_t M,
-    const int64_t N,
-    const int64_t K,
-    const int64_t workspace_size,
-    void* workspace,
-    void* output)
-{
-    GemmAPI* api = (GemmAPI*)handle;
+    CtaShape32x64x64_WarpShape32x16x64,
+    CtaShape32x64x128_WarpShape32x16x128,
+    CtaShape32x64x256_WarpShape32x16x128,
+    CtaShape32x32x128_WarpShape32x16x128,
+    CtaShape32x32x256_WarpShape32x16x128,
 
-    return api->Execute(
-        output,
-        input,
-        weight,
-        weight_scale,
-        bias,
-        workspace,
-        M, N, K,
-        128,
-        workspace_size,
-        nullptr,
-        stream
-    );
-}
+    CtaShape64x32x128_WarpShape32x16x128,
+    CtaShape64x32x64_WarpShape32x16x64
+};
 
-}}}}}}
+enum class SplitKStyle { NO_SPLIT_K, SPLIT_K };
+
+struct GemmConfig {
+    TileConfig tile_config = TileConfig::ChooseWithHeuristic;
+    SplitKStyle split_k_style = SplitKStyle::NO_SPLIT_K;
+    int split_k_factor = -1;
+    int stages = -1;
+};
+
+}}}}}} // namespace ppl::kernel::llm::cuda::pmx::i4f16
