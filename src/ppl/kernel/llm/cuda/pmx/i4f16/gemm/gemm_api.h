@@ -15,51 +15,28 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include "ppl/kernel/llm/cuda/pmx/i4f16/gemm.h"
+#pragma once
 
-#include "ppl/common/log.h"
+#include "algorithm.h"
 
-#include "gemm/gemm_api.h"
+#include "ppl/kernel/llm/cuda/common/general_include.h"
+
+#include <memory>
 
 namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pmx { namespace i4f16 {
 
-void* create_gemm_handle() {
-    return (void*)(new GemmAPI());
-}
+class GemmAPI {
+public:
+    GemmAPI();
 
-void destory_gemm_handle(void* handle) {
-    delete ((GemmAPI*)handle);
-}
+    ~GemmAPI();
 
-ppl::common::RetCode gemm(
-    const cudaStream_t stream,
-    const void* handle,
-    const void* input,
-    const void* weight,
-    const void* weight_scale,
-    const void* bias,
-    const int64_t M,
-    const int64_t N,
-    const int64_t K,
-    const int64_t workspace_size,
-    void* workspace,
-    void* output)
-{
-    GemmAPI* api = (GemmAPI*)handle;
+    ppl::common::RetCode Execute(void* C, const void* A, const void* B, const void* S, const void* bias, void* workspace,
+                          int m, int n, int k, int group_size, int workspace_size, GemmAlgorithm_t* algo = nullptr,
+                          cudaStream_t st = nullptr) const;
+private:
+    struct GemmImpl;
+    std::unique_ptr<GemmImpl> impl_;
+};
 
-    return api->Execute(
-        output,
-        input,
-        weight,
-        weight_scale,
-        bias,
-        workspace,
-        M, N, K,
-        128,
-        workspace_size,
-        nullptr,
-        stream
-    );
-}
-
-}}}}}}
+}}}}}} // namespace ppl::kernel::llm::cuda::pmx::i4f16
