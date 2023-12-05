@@ -64,7 +64,7 @@ struct dynamic_batching_kv_cache_quantize_kernel_param {
     half* scale;
 };
 
-template<int32_t HEAD_SIZE, int32_t VPT> // 8 fp16 occupy 128 bytes, which can be loaded by a single thread at once.
+template<int32_t HEAD_SIZE, int32_t VPT, int32_t TPB> // 8 fp16 occupy 128 bytes, which can be loaded by a single thread at once.
 __global__
 void dynamic_batching_kv_cache_quantize_kernel(dynamic_batching_kv_cache_quantize_kernel_param p)
 {
@@ -72,13 +72,15 @@ void dynamic_batching_kv_cache_quantize_kernel(dynamic_batching_kv_cache_quantiz
         constexpr int64_t thd_per_head_size = HEAD_SIZE / VPT;
         const int64_t batch_id = blockIdx.x;
         const int64_t seq_idx = blockIdx.y;
-        const int64_t input_token_idx = p.seqstarts[batch_id] + seq_idx;
-        const int64_t cache_token_idx = p.cachestarts[batch_id] + seq_idx + p.start_pos[batch_id];
-        const int64_t key_out_offset = cache_token_idx * p.cache_stride_s + p.layer_idx * p.cache_stride_l;
-        auto key_in_ptr = p.current_key + input_token_idx * p.current_key_stride_s;
-        auto value_in_ptr = p.current_value + input_token_idx * p.current_value_stride_s;
+        const int64_t tid = blockIdx.z * TPB + threadIdx.x;
 
-        for (int32_t tid = threadIdx.x; tid < HEAD_SIZE * p.num_kv_heads / VPT; tid += blockDim.x) {
+        if (tid < HEAD_SIZE * p.num_kv_heads / VPT) {
+            const int64_t input_token_idx = p.seqstarts[batch_id] + seq_idx;
+            const int64_t cache_token_idx = p.cachestarts[batch_id] + seq_idx + p.start_pos[batch_id];
+            const int64_t key_out_offset = cache_token_idx * p.cache_stride_s + p.layer_idx * p.cache_stride_l;
+            auto key_in_ptr = p.current_key + input_token_idx * p.current_key_stride_s;
+            auto value_in_ptr = p.current_value + input_token_idx * p.current_value_stride_s;
+
             const int64_t kv_head_idx = tid / thd_per_head_size;
             const int64_t dim_idx = (tid % thd_per_head_size) * VPT;
             const int64_t scale_dim_idx = dim_idx / VPT;
@@ -103,18 +105,17 @@ void dynamic_batching_kv_cache_quantize_kernel(dynamic_batching_kv_cache_quantiz
 
             // calculate kv scale
             const half eps = 1e-5f;
-            const half fact = 127.f;
-            half key_scale = 0.0f;
-            half value_scale = 0.0f;
+            half key_max = 0.0f;
+            half value_max = 0.0f;
 
             #pragma unroll
             for (int32_t i = 0; i < VPT; i ++){
-                key_scale = key_scale > __habs(key_in[i]) ? key_scale : __habs(key_in[i]);
-                value_scale = value_scale > __habs(value_in[i]) ? value_scale : __habs(value_in[i]);
+                key_max = key_max > __habs(key_in[i]) ? key_max : __habs(key_in[i]);
+                value_max = value_max > __habs(value_in[i]) ? value_max : __habs(value_in[i]);
             }
 
-            key_scale = key_scale / fact; 
-            value_scale = value_scale / fact;
+            half key_scale = __float2half(__half2float(key_max) / 127.0f);
+            half value_scale = __float2half(__half2float(value_max) / 127.0f);
             key_scale = key_scale > eps ? key_scale : eps;
             value_scale = value_scale > eps ? value_scale : eps;
 
@@ -145,6 +146,17 @@ float attn_thread_group_dot(half* local_q, half* local_k)
     for(int32_t i = 0; i < ELEMENT_NUM; i++) {
         qk += __half2float(local_q[i]) * __half2float(local_k[i]);
     }
+#pragma unroll
+    for (int32_t mask = THREAD_GROUP_SIZE / 2; mask >= 1; mask /= 2) {
+        qk += __shfl_xor_sync(uint32_t(-1), qk, mask);
+    }
+    return qk;
+}
+
+template<int32_t THREAD_GROUP_SIZE>
+__device__ inline
+float attn_thread_group_reduce_sum(float qk)
+{
 #pragma unroll
     for (int32_t mask = THREAD_GROUP_SIZE / 2; mask >= 1; mask /= 2) {
         qk += __shfl_xor_sync(uint32_t(-1), qk, mask);
@@ -224,19 +236,19 @@ void dynamic_batching_decoding_cache_attention_fp16_kernel(dynamic_batching_deco
     * You have to remember that this Kernel was created by a brother on the night of July 20, 2023. On that day,
     * Beijing experienced the strongest rainstorm since the beginning of summer.
 
-    DecodingAttention is a special operator designed specifically for large language models(LLM) decoding. 
-    
-    It requires that the length of each input Query is always 1, 
+    DecodingAttention is a special operator designed specifically for large language models(LLM) decoding.
+
+    It requires that the length of each input Query is always 1,
         while the Key and Value can have different lengths.
 
-    This operator supports padding removal optimization, meaning that Q, K, and V all need to have their tokens 
-        concentrated in one sentence for input, with shapes like Q: [seq_lens, num_heads, head_size], 
+    This operator supports padding removal optimization, meaning that Q, K, and V all need to have their tokens
+        concentrated in one sentence for input, with shapes like Q: [seq_lens, num_heads, head_size],
         and K: [context_lens, num_kv_heads, head_size].
 
     Since the Query sentence length is always 1, this operator is literally a fused matrix-vector multiplications operation.
-        It does not utilize tensor cores for computation. 
+        It does not utilize tensor cores for computation.
 
-    The calculation logic is divided into three steps: gemv(QK) + softmax(Attention) + gemv(KV). 
+    The calculation logic is divided into three steps: gemv(QK) + softmax(Attention) + gemv(KV).
         In the provided code, it has already been split into these three parts.
     ***/
 
@@ -295,9 +307,9 @@ void dynamic_batching_decoding_cache_attention_fp16_kernel(dynamic_batching_deco
     // Step 2. Solve QK Dot
 
     // In the process of handling the QK matrix multiplication, we will divide a complete Thread Warp into several Thread groups.
-    // Each thread group reads the entire Query and saves it in registers. 
-    // Then, each thread group iterates through the vectors in the Key and performs dot products with the Query. 
-    // During this process, a WARP performs multiple vector dot product operations at once. 
+    // Each thread group reads the entire Query and saves it in registers.
+    // Then, each thread group iterates through the vectors in the Key and performs dot products with the Query.
+    // During this process, a WARP performs multiple vector dot product operations at once.
     // At the same time, we also record the maximum current_value of the dot product results for later use in the softmax operation.
     const int64_t context_len = p.kvstarts[batch_idx + 1] - p.kvstarts[batch_idx];
     extern __shared__ float logits[];
@@ -305,14 +317,13 @@ void dynamic_batching_decoding_cache_attention_fp16_kernel(dynamic_batching_deco
 
     for (int64_t base_id = warp_id * GPW; base_id < context_len; base_id += GPT) {
         int8_t local_k_quant[VEC_SIZE * VEC_LEN];
-        half local_k[VEC_SIZE * VEC_LEN];
         half local_k_scale[VEC_LEN];
         const int64_t context_id = base_id + group_id;
 
+        float qk_dot = 0.0f;
+
         // all thread groups within a warp must be launched together.
-        if (context_id >= context_len){
-            memset(local_k, 0, sizeof(local_k));
-        } else {
+        if (context_id < context_len) {
             const int64_t key_offset
                             = (cache_offset_s + context_id) * p.cache_stride_s
                             + p.layer_idx * p.cache_stride_l
@@ -325,14 +336,10 @@ void dynamic_batching_decoding_cache_attention_fp16_kernel(dynamic_batching_deco
                 copy<sizeof(int8_t) * VEC_SIZE>(&p.cache[key_idx],  &local_k_quant[i * VEC_SIZE]);
                 const int64_t key_scale_idx = key_idx >> QUANT_GROUP_SHIFT;
                 local_k_scale[i] = p.scale[key_scale_idx];
-            }
 
-
-            #pragma unroll
-            for (int64_t i = 0; i < VEC_LEN; i++) {
                 #pragma unroll
-                for(int64_t k = i * VEC_SIZE; k < (i + 1) * VEC_SIZE; k++) {
-                    local_k_quant[k] += 128;
+                for(int64_t k = 0; k < VEC_SIZE; k++) {
+                    local_k_quant[i * VEC_SIZE + k] += 128;
                 }
                 half result[8];
                 uint32_t*      h   = reinterpret_cast<uint32_t*>(result);
@@ -349,15 +356,13 @@ void dynamic_batching_decoding_cache_attention_fp16_kernel(dynamic_batching_deco
                 asm volatile("sub.f16x2 %0, %1, %2;\n" : "=r"(h_2[1]) : "r"(h_2[1]), "r"(I8s_TO_F16s_MAGIC_NUM));
                 #pragma unroll
                 for (int64_t j = 0; j < VEC_SIZE; j++) {
-                    local_k[i * VEC_SIZE + j] = local_k_scale[i] * result[j];
+                    qk_dot += __half2float(local_q[i * VEC_SIZE + j]) * __half2float(local_k_scale[i] * result[j]);
                 }
             }
         }
 
         // Ready for QK Dot
-        const float qk_dot
-            = p.attn_scale
-            * attn_thread_group_dot<THREAD_GROUP_SIZE, VEC_LEN * VEC_SIZE>(local_q, local_k);
+        qk_dot = p.attn_scale * attn_thread_group_reduce_sum<THREAD_GROUP_SIZE>(qk_dot);
 
         if (group_lane_id == 0 && context_id < context_len) {
             logits[context_id] = qk_dot;
@@ -368,8 +373,8 @@ void dynamic_batching_decoding_cache_attention_fp16_kernel(dynamic_batching_deco
     // ------------------------------------------------ //
     // Step 3. Softmax
 
-    // The process of solving softmax is divided into two stages. 
-    // First, we need to reduce qk_max in two dimensions: WARP and ThreadBlock. 
+    // The process of solving softmax is divided into two stages.
+    // First, we need to reduce qk_max in two dimensions: WARP and ThreadBlock.
     // Afterward, we use reduced qk_max to perform softmax calculations,
     //    the results will all be stored in shared memory.
     __shared__ float red_smem[WPT];
@@ -425,13 +430,10 @@ void dynamic_batching_decoding_cache_attention_fp16_kernel(dynamic_batching_deco
                 copy<sizeof(int8_t) * VEC_SIZE>(&p.cache[value_idx],  &local_v_quant[i * VEC_SIZE]);
                 const int64_t value_scale_idx = value_idx >> QUANT_GROUP_SHIFT;
                 local_v_scale[i] = p.scale[value_scale_idx];
-            }
 
-            #pragma unroll
-            for (int64_t i = 0; i < VEC_LEN; i++) {
                 #pragma unroll
-                for(int64_t k = i * VEC_SIZE; k < (i + 1) * VEC_SIZE; k++) {
-                    local_v_quant[k] += 128;
+                for(int64_t k = 0; k < VEC_SIZE; k++) {
+                    local_v_quant[i * VEC_SIZE + k] += 128;
                 }
                 half result[8];
                 uint32_t*      h   = reinterpret_cast<uint32_t*>(result);
@@ -461,34 +463,64 @@ void dynamic_batching_decoding_cache_attention_fp16_kernel(dynamic_batching_deco
             local_v[i] += __shfl_xor_sync(uint32_t(-1), local_v[i], mask);
         }
     }
-    //for now, every warp's each thread group got the partial result inside a warp 
+    //for now, every warp's each thread group got the partial result inside a warp
     //we need to add up each warp's first thread group by reusing the logits smem
+
+    // wait for logits to be reused
     __syncthreads();
 
-    // do some reuse
-    for (int64_t i = threadIdx.x; i < HEAD_SIZE; i += TPB){
-        logits[i] = 0;
-    }
+    constexpr int64_t WORK_THREAD = WPT * THREAD_GROUP_SIZE * VEC_LEN;
+    constexpr int64_t VPT = 16;
+    constexpr int64_t V32PT = 16 / sizeof(float);
+    const int32_t v_warp_id  = threadIdx.x % WPT;
+    const int32_t v_group_id = (threadIdx.x / WPT) % THREAD_GROUP_SIZE;
+    const int32_t v_vec_id   = threadIdx.x / (WPT * THREAD_GROUP_SIZE);
+    half local_out[VEC_SIZE];
 
-    __syncthreads();
-
+    // save local_v to shared memory
     if (warp_lane_id < THREAD_GROUP_SIZE) {
         #pragma unroll
-        for (int32_t i = 0; i < VEC_LEN; i++) {
-            #pragma unroll
-            for (int32_t j = 0; j < VEC_SIZE; j++) {
-                atomicAdd(
-                    logits + i * THREAD_GROUP_SIZE * VEC_SIZE + warp_lane_id * VEC_SIZE + j,
-                    local_v[i * VEC_SIZE + j]
-                );
-            }
+        for (int32_t i = 0; i < VEC_LEN * VEC_SIZE; i += V32PT) {
+            copy<VPT>(
+                &local_v[i],
+                &logits[
+                    i * WPT * THREAD_GROUP_SIZE +
+                    warp_id * THREAD_GROUP_SIZE * V32PT +
+                    warp_lane_id * V32PT]);
         }
     }
 
     __syncthreads();
 
-    for (int64_t i = threadIdx.x; i < HEAD_SIZE; i += TPB){
-        p.output[batch_idx * p.output_stride_s + head_idx * HEAD_SIZE + i] = logits[i];
+    // WPT reduce
+    if (threadIdx.x < WORK_THREAD) {
+        #pragma unroll
+        for (int32_t i = 0; i < VEC_SIZE; i+= V32PT) {
+            copy<VPT>(
+                &logits[
+                    v_vec_id * VEC_SIZE * WPT * THREAD_GROUP_SIZE +
+                    i * WPT * THREAD_GROUP_SIZE +
+                    v_warp_id * THREAD_GROUP_SIZE * V32PT +
+                    v_group_id * V32PT],
+                &local_v[i]);
+        }
+        #pragma unroll
+        for (int32_t i = 0; i < VEC_SIZE; i++) {
+            #pragma unroll
+            for (int32_t mask = WPT / 2; mask >= 1; mask /= 2) {
+                local_v[i] += __shfl_xor_sync(uint32_t(-1), local_v[i], mask);
+            }
+            local_out[i] = __float2half(local_v[i]);
+        }
+        if (v_warp_id == 0) {
+            copy<VPT>(
+                local_out,
+                &p.output[
+                    batch_idx * p.output_stride_s +
+                    head_idx * HEAD_SIZE +
+                    v_vec_id * THREAD_GROUP_SIZE * VEC_SIZE +
+                    v_group_id * VEC_SIZE]);
+        }
     }
 }
 
@@ -540,13 +572,13 @@ ppl::common::RetCode dynamic_batch_multi_head_cache_attention(
     }
 
     if (current_key_shape->GetDim(1) != num_kv_heads) {
-        LOG(ERROR) 
+        LOG(ERROR)
             << "currnetly do not support leading dim on current_key's num_kv_heads";
         return ppl::common::RC_UNSUPPORTED;
     }
 
     if (current_value_shape->GetDim(1) != num_kv_heads) {
-        LOG(ERROR) 
+        LOG(ERROR)
             << "currnetly do not support leading dim on current_value's num_kv_heads";
         return ppl::common::RC_UNSUPPORTED;
     }
@@ -606,9 +638,10 @@ ppl::common::RetCode dynamic_batch_multi_head_cache_attention(
             LOG(ERROR) << "currently kv_cache_quantize_kernel only support head_dim == 128.";
             return ppl::common::RC_UNSUPPORTED;
         }
-        dim3 grid(batch, max_seqlen);
-        const int32_t block_size = GetBlockSize(num_kv_heads * head_dim / 8);
-        dynamic_batching_kv_cache_quantize_kernel<128, 8><<<grid, block_size, 0, stream>>>(
+        const int32_t VPT = 8;
+        const int32_t TPB = 256;
+        dim3 grid(batch, max_seqlen, (num_kv_heads * head_dim / VPT + TPB - 1) / TPB);
+        dynamic_batching_kv_cache_quantize_kernel<128, VPT, TPB><<<grid, TPB, 0, stream>>>(
             {(half*)current_key,
             (half*)current_value,
             (int64_t*)seqstarts,
@@ -630,11 +663,12 @@ ppl::common::RetCode dynamic_batch_multi_head_cache_attention(
     if(decoding_batches > 0) {
         constexpr int64_t WARP_SIZE = 32;
         constexpr int64_t TPB = 256;
+        constexpr int64_t WPT = TPB / WARP_SIZE;
         const int64_t MAX_SHM_SIZE = device_prop.sharedMemPerBlockOptin;
         const int64_t RAW_SHM_SIZE = 48 * 1024;
 
         constexpr int64_t reduce_shm_size = TPB / WARP_SIZE * sizeof(float);
-        const int64_t logits_size = max(max_kvlen * sizeof(float), head_dim * sizeof(float));
+        const int64_t logits_size = max(max_kvlen * sizeof(float), WPT * head_dim * sizeof(float));
         const int64_t kernel_shm_size = reduce_shm_size + logits_size;
 
         if (kernel_shm_size <= MAX_SHM_SIZE) {
