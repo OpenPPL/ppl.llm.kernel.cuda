@@ -43,6 +43,13 @@ struct dynamic_batching_decoding_cache_attention_kernel_param {
     int64_t cache_stride_l;
     int64_t cache_stride_h;
     int64_t cache_stride_kv;
+
+    struct {
+        int32_t* block_counter;
+        float* partial_max;
+        float* partial_sum;
+        half* partial_out;
+    } multi_block;
 };
 
 struct dynamic_batching_kv_cache_quantize_kernel_param {
@@ -63,6 +70,21 @@ struct dynamic_batching_kv_cache_quantize_kernel_param {
     int8_t* cache;
     half* scale;
 };
+
+uint64_t CalcMultiBlockSize(const int64_t grid_size, const int64_t max_kvlen, const int64_t head_dim) {
+    uint64_t block_size = 1;
+
+    if (grid_size < 128 && max_kvlen >= 512) {
+        constexpr int64_t VPT = 16 / sizeof(half);
+
+        uint64_t tmp_size = 256 / (head_dim / VPT);
+        while (block_size < tmp_size) {
+            block_size <<= 1;
+        }
+    }
+
+    return block_size;
+}
 
 template<int32_t HEAD_SIZE, int32_t VPT, int32_t TPB> // 8 fp16 occupy 128 bytes, which can be loaded by a single thread at once.
 __global__
@@ -228,6 +250,7 @@ template<
     int32_t THREAD_GROUP_SIZE,        // how many threads inside a group
     int32_t TPB,
     int32_t QUANT_GROUP,
+    int32_t MULTI_BLOCK,    // do flash decoding if more than 1
     bool SHIFT_KV>
 __global__
 void dynamic_batching_decoding_cache_attention_fp16_kernel(dynamic_batching_decoding_cache_attention_kernel_param p)
@@ -264,8 +287,10 @@ void dynamic_batching_decoding_cache_attention_fp16_kernel(dynamic_batching_deco
     constexpr int64_t GPT       = WARP_SIZE / THREAD_GROUP_SIZE * WPT; // thread group per thread block
 
     // const int64_t num_heads     = gridDim.x;
+    const int64_t batch_size    = gridDim.y;
     const int64_t head_idx      = blockIdx.x;
     const int64_t batch_idx     = blockIdx.y;
+    const int64_t block_idx     = blockIdx.z;
     constexpr int64_t VEC_SIZE  = 16 / sizeof(half);  // 128 bits
 
     // ------------------------------------------------ //
@@ -311,21 +336,25 @@ void dynamic_batching_decoding_cache_attention_fp16_kernel(dynamic_batching_deco
     // Then, each thread group iterates through the vectors in the Key and performs dot products with the Query.
     // During this process, a WARP performs multiple vector dot product operations at once.
     // At the same time, we also record the maximum current_value of the dot product results for later use in the softmax operation.
-    const int64_t context_len = p.kvstarts[batch_idx + 1] - p.kvstarts[batch_idx];
-    extern __shared__ float logits[];
-    float qk_max = -FLT_MAX;
+    const int64_t context_len           = p.kvstarts[batch_idx + 1] - p.kvstarts[batch_idx];
+    const int64_t context_len_per_block = (context_len + MULTI_BLOCK - 1) / MULTI_BLOCK;
+    const int64_t block_base_id         = block_idx * context_len_per_block;
+    const int64_t block_context_len     = context_len >= context_len_per_block * (block_idx + 1) ? context_len_per_block : context_len - block_base_id;
 
-    for (int64_t base_id = warp_id * GPW; base_id < context_len; base_id += GPT) {
+    extern __shared__ float logits[];
+    float partial_qk_max = -FLT_MAX;
+
+    for (int64_t base_id = warp_id * GPW; base_id < block_context_len; base_id += GPT) {
         int8_t local_k_quant[VEC_SIZE * VEC_LEN];
         half local_k_scale[VEC_LEN];
-        const int64_t context_id = base_id + group_id;
+        const int64_t block_context_id = base_id + group_id;
 
         float qk_dot = 0.0f;
 
         // all thread groups within a warp must be launched together.
-        if (context_id < context_len) {
+        if (block_context_id < block_context_len) {
             const int64_t key_offset
-                            = (cache_offset_s + context_id) * p.cache_stride_s
+                            = (cache_offset_s + block_base_id + block_context_id) * p.cache_stride_s
                             + p.layer_idx * p.cache_stride_l
                             + kv_head_idx * p.cache_stride_h
                             + group_lane_id * VEC_SIZE;
@@ -364,42 +393,56 @@ void dynamic_batching_decoding_cache_attention_fp16_kernel(dynamic_batching_deco
         // Ready for QK Dot
         qk_dot = p.attn_scale * attn_thread_group_reduce_sum<THREAD_GROUP_SIZE>(qk_dot);
 
-        if (group_lane_id == 0 && context_id < context_len) {
-            logits[context_id] = qk_dot;
-            qk_max = fmaxf(qk_dot, qk_max);
-        }
+        if (group_lane_id == 0 && block_context_id < block_context_len) {
+            logits[block_context_id] = qk_dot;
+            partial_qk_max = fmaxf(qk_dot, partial_qk_max);
+       }
     }
 
     // ------------------------------------------------ //
     // Step 3. Softmax
 
     // The process of solving softmax is divided into two stages.
-    // First, we need to reduce qk_max in two dimensions: WARP and ThreadBlock.
-    // Afterward, we use reduced qk_max to perform softmax calculations,
+    // First, we need to reduce partial_qk_max in two dimensions: WARP and ThreadBlock.
+    // Afterward, we use reduced partial_qk_max to perform softmax calculations,
     //    the results will all be stored in shared memory.
     __shared__ float red_smem[WPT];
 
-    // reduce qk_max in thread block and boardcast
-    qk_max = attn_block_reduce_max<WPT>(qk_max, red_smem);
+    // reduce partial_qk_max in thread block and boardcast
+    partial_qk_max = attn_block_reduce_max<WPT>(partial_qk_max, red_smem);
 
     // Softmax Kernel Logic Start here
-    float exp_sum = 0.0f;
-    for (int64_t context_id = threadIdx.x; context_id < context_len; context_id += TPB){
-        logits[context_id] -= qk_max;
-        logits[context_id] = exp(logits[context_id]);
-        exp_sum += logits[context_id];
+    float partial_exp_sum = 0.0f;
+    for (int64_t block_context_id = threadIdx.x; block_context_id < block_context_len; block_context_id += TPB){
+        logits[block_context_id] -= partial_qk_max;
+        logits[block_context_id] = exp(logits[block_context_id]);
+        partial_exp_sum += logits[block_context_id];
     }
 
-    // block reduce sum on exp_sum
+    // block reduce sum on partial_exp_sum
     // Warp per thread block must be power-of-2 for reducation, check attn_block_reduce_sum kernel.
     static_assert(WPT == 2 || WPT == 4 || WPT == 8 || WPT == 16 || WPT == 32 || WPT == 64);
-    exp_sum = attn_block_reduce_sum<WPT>(exp_sum, red_smem);
+    partial_exp_sum = attn_block_reduce_sum<WPT>(partial_exp_sum, red_smem);
 
-    const float inv_sum = __fdividef(1.f, exp_sum + 1e-6f);
-    for (int64_t context_id = threadIdx.x; context_id < context_len; context_id += TPB) {
-        logits[context_id] *= inv_sum;
+    if (MULTI_BLOCK == 1) {
+        const float inv_sum = __fdividef(1.f, partial_exp_sum + 1e-6f);
+        for (int64_t block_context_id = threadIdx.x; block_context_id < block_context_len; block_context_id += TPB) {
+            logits[block_context_id] *= inv_sum;
+        }
+        __syncthreads(); // Must have this.
     }
-    __syncthreads(); // Must have this.
+    else if (threadIdx.x == 0) {
+        p.multi_block.partial_max[
+            head_idx * batch_size * MULTI_BLOCK +
+            batch_idx * MULTI_BLOCK +
+            block_idx]
+            = partial_qk_max;
+        p.multi_block.partial_sum[
+            head_idx * batch_size * MULTI_BLOCK +
+            batch_idx * MULTI_BLOCK +
+            block_idx]
+            = partial_exp_sum;
+    }
 
     // ------------------------------------------------ //
     // Step 4. Solve logits * V
@@ -413,12 +456,12 @@ void dynamic_batching_decoding_cache_attention_fp16_kernel(dynamic_batching_deco
         local_v[i] = 0;
     }
 
-    for (int64_t base_id = warp_id * GPW; base_id < context_len; base_id += GPT) {
-        const int64_t context_id = base_id + group_id;
+    for (int64_t base_id = warp_id * GPW; base_id < block_context_len; base_id += GPT) {
+        const int64_t block_context_id = base_id + group_id;
         // all thread groups within a warp must be launched together.
-        if (context_id < context_len){
+        if (block_context_id < block_context_len){
             const int64_t value_offset
-                            = (cache_offset_s + context_id) * p.cache_stride_s
+                            = (cache_offset_s + block_base_id + block_context_id) * p.cache_stride_s
                             + p.layer_idx * p.cache_stride_l
                             + kv_head_idx * p.cache_stride_h
                             + group_lane_id * VEC_SIZE
@@ -450,7 +493,7 @@ void dynamic_batching_decoding_cache_attention_fp16_kernel(dynamic_batching_deco
                 asm volatile("sub.f16x2 %0, %1, %2;\n" : "=r"(h_2[1]) : "r"(h_2[1]), "r"(I8s_TO_F16s_MAGIC_NUM));
                 #pragma unroll
                 for (int64_t j = 0; j < VEC_SIZE; j++) {
-                    local_v[i * VEC_SIZE + j] += __half2float(local_v_scale[i] * result[j]) * logits[context_id];
+                    local_v[i * VEC_SIZE + j] += __half2float(local_v_scale[i] * result[j]) * logits[block_context_id];
                 }
             }
         }
@@ -472,9 +515,11 @@ void dynamic_batching_decoding_cache_attention_fp16_kernel(dynamic_batching_deco
     constexpr int64_t WORK_THREAD = WPT * THREAD_GROUP_SIZE * VEC_LEN;
     constexpr int64_t VPT = 16;
     constexpr int64_t V32PT = 16 / sizeof(float);
+
     const int32_t v_warp_id  = threadIdx.x % WPT;
     const int32_t v_group_id = (threadIdx.x / WPT) % THREAD_GROUP_SIZE;
     const int32_t v_vec_id   = threadIdx.x / (WPT * THREAD_GROUP_SIZE);
+
     half local_out[VEC_SIZE];
 
     // save local_v to shared memory
@@ -485,8 +530,8 @@ void dynamic_batching_decoding_cache_attention_fp16_kernel(dynamic_batching_deco
                 &local_v[i],
                 &logits[
                     i * WPT * THREAD_GROUP_SIZE +
-                    warp_id * THREAD_GROUP_SIZE * V32PT +
-                    warp_lane_id * V32PT]);
+                    warp_lane_id * WPT * V32PT +
+                    ((warp_id + warp_lane_id) % WPT) * V32PT]);
         }
     }
 
@@ -500,8 +545,8 @@ void dynamic_batching_decoding_cache_attention_fp16_kernel(dynamic_batching_deco
                 &logits[
                     v_vec_id * VEC_SIZE * WPT * THREAD_GROUP_SIZE +
                     i * WPT * THREAD_GROUP_SIZE +
-                    v_warp_id * THREAD_GROUP_SIZE * V32PT +
-                    v_group_id * V32PT],
+                    v_group_id * WPT * V32PT +
+                    ((v_warp_id + v_group_id) % WPT) * V32PT],
                 &local_v[i]);
         }
         #pragma unroll
@@ -513,13 +558,93 @@ void dynamic_batching_decoding_cache_attention_fp16_kernel(dynamic_batching_deco
             local_out[i] = __float2half(local_v[i]);
         }
         if (v_warp_id == 0) {
-            copy<VPT>(
-                local_out,
-                &p.output[
-                    batch_idx * p.output_stride_s +
-                    head_idx * HEAD_SIZE +
-                    v_vec_id * THREAD_GROUP_SIZE * VEC_SIZE +
-                    v_group_id * VEC_SIZE]);
+            half* partial_out = MULTI_BLOCK == 1 ?
+            &p.output[
+                batch_idx * p.output_stride_s +
+                head_idx * HEAD_SIZE +
+                v_vec_id * THREAD_GROUP_SIZE * VEC_SIZE +
+                v_group_id * VEC_SIZE] :
+            &p.multi_block.partial_out[
+                head_idx * batch_size * HEAD_SIZE * MULTI_BLOCK +
+                batch_idx * HEAD_SIZE * MULTI_BLOCK +
+                v_vec_id * THREAD_GROUP_SIZE * MULTI_BLOCK * VEC_SIZE +
+                v_group_id * MULTI_BLOCK * VEC_SIZE +
+                block_idx * VEC_SIZE];
+            copy<VPT>(local_out, partial_out);
+        }
+    }
+
+    // Flash decoding
+    if (MULTI_BLOCK > 1) {
+        __syncthreads();
+
+        bool last_block = false;
+        // Make sure every block finishs the partial computation.
+        if (threadIdx.x == 0)
+        {
+            if (atomicAdd(&p.multi_block.block_counter[head_idx * batch_size + batch_idx], 1) == MULTI_BLOCK - 1)
+            {
+                last_block = true;
+            }
+        }
+
+        // The last block do the final computation.
+        if (__syncthreads_or(last_block)) {
+            const int64_t multi_block_idx = threadIdx.x % MULTI_BLOCK;
+            const int64_t hbb = head_idx * batch_size * MULTI_BLOCK + batch_idx * MULTI_BLOCK + multi_block_idx;
+
+            float final_qk_max = warp_lane_id < MULTI_BLOCK ? p.multi_block.partial_max[hbb] : -FLT_MAX;
+            # pragma unroll
+            for (int32_t mask = MULTI_BLOCK / 2; mask >= 1; mask /= 2) {
+                final_qk_max = fmaxf(final_qk_max, __shfl_xor_sync(uint32_t(-1), final_qk_max, mask));
+            }
+            final_qk_max = __shfl_sync(uint32_t(-1), final_qk_max, 0);
+
+            float final_exp_sum = warp_lane_id < MULTI_BLOCK ? p.multi_block.partial_sum[hbb] * exp(p.multi_block.partial_max[hbb] - final_qk_max) : 0.0f;
+            # pragma unroll
+            for (int32_t mask = MULTI_BLOCK / 2; mask >= 1; mask /= 2) {
+                final_exp_sum += __shfl_xor_sync(uint32_t(-1), final_exp_sum, mask);
+            }
+            final_exp_sum = __shfl_sync(uint32_t(-1), final_exp_sum, 0);
+
+            const float final_inv_sum = __fdividef(1.f, final_exp_sum + 1e-6f);
+
+            const int64_t head_dim_idx_base  = (int64_t)(threadIdx.x / MULTI_BLOCK) * VEC_SIZE;
+            const int64_t head_dim_idx_stride = TPB / MULTI_BLOCK * VEC_SIZE;
+
+            for (int64_t head_dim_idx = head_dim_idx_base; head_dim_idx < HEAD_SIZE; head_dim_idx += head_dim_idx_stride) {
+                half final_out[VEC_SIZE];
+                float tmp_max = p.multi_block.partial_max[
+                    head_idx * batch_size * MULTI_BLOCK +
+                    batch_idx * MULTI_BLOCK +
+                    multi_block_idx];
+                copy<VEC_SIZE*sizeof(half)>(
+                    &p.multi_block.partial_out[
+                        head_idx * batch_size * HEAD_SIZE * MULTI_BLOCK +
+                        batch_idx * HEAD_SIZE * MULTI_BLOCK +
+                        head_dim_idx * MULTI_BLOCK +
+                        multi_block_idx * VEC_SIZE],
+                    final_out);
+
+                #pragma unroll
+                for (int32_t i = 0; i < VEC_SIZE; i++) {
+                    float float_out = __half2float(final_out[i]) * exp(tmp_max - final_qk_max) * final_inv_sum;
+                    # pragma unroll
+                    for (int32_t mask = MULTI_BLOCK / 2; mask >= 1; mask /= 2) {
+                        float_out += __shfl_xor_sync(uint32_t(-1), float_out, mask);
+                    }
+                    final_out[i] = __float2half(float_out);
+                }
+
+                if (multi_block_idx == 0) {
+                    copy<VPT>(
+                        final_out,
+                        &p.output[
+                            batch_idx * p.output_stride_s +
+                            head_idx * HEAD_SIZE +
+                            head_dim_idx]);
+                }
+            }
         }
     }
 }
@@ -556,6 +681,10 @@ ppl::common::RetCode dynamic_batch_multi_head_cache_attention(
     const int64_t cache_stride_l,
     const int64_t cache_stride_h,
     const int64_t cache_stride_kv,
+    void* multi_block_counter,
+    void* multi_block_max,
+    void* multi_block_sum,
+    void* multi_block_out,
     void* cache, // int8 (S, L, 2, KVH, D), (L, KVH, S, 2, D)
     void* scale, // float16 (S, L, 2, KVH, D/8), (L, KVH, S, 2, D/8)
     const ppl::common::TensorShape* output_shape,
@@ -628,6 +757,16 @@ ppl::common::RetCode dynamic_batch_multi_head_cache_attention(
     p.cache_stride_h = cache_stride_h;
     p.cache_stride_kv = cache_stride_kv;
 
+    const uint64_t multi_block_size = CalcMultiBlockSize(decoding_batches * num_heads, max_kvlen, head_dim);
+
+    if (multi_block_size > 1) {
+        p.multi_block.block_counter = (int32_t*)multi_block_counter;
+        p.multi_block.partial_max   = (float*)multi_block_max;
+        p.multi_block.partial_sum   = (float*)multi_block_sum;
+        p.multi_block.partial_out   = (half*)multi_block_out;
+        cudaMemset(p.multi_block.block_counter, 0, decoding_batches * num_heads * sizeof(int32_t));
+    }
+
     if (num_heads != num_kv_heads) {
         LOG(ERROR) << "currently do not support GQA, whose num_heads != num_kv_heads";
         return ppl::common::RC_UNSUPPORTED;
@@ -668,27 +807,50 @@ ppl::common::RetCode dynamic_batch_multi_head_cache_attention(
         const int64_t RAW_SHM_SIZE = 48 * 1024;
 
         constexpr int64_t reduce_shm_size = TPB / WARP_SIZE * sizeof(float);
-        const int64_t logits_size = max(max_kvlen * sizeof(float), WPT * head_dim * sizeof(float));
+        const int64_t max_multi_block_kvlen = (max_kvlen * sizeof(float) + multi_block_size - 1) / multi_block_size;
+        const int64_t logits_size = max(max_multi_block_kvlen, WPT * head_dim * sizeof(float));
         const int64_t kernel_shm_size = reduce_shm_size + logits_size;
 
         if (kernel_shm_size <= MAX_SHM_SIZE) {
-            auto kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<64, 4, 256, 8, true>;
-            switch (head_dim) {
-                case 64:
-                    kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<64, 4, 256, 8, true>;
-                    break;
-                case 96:
-                    kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<96, 4, 256, 8, true>;
-                    break;
-                case 128:
-                    kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<128, 8, 256, 8, true>;;
-                    break;
-                case 256:
-                    kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<256, 16, 256, 8, true>;
-                    break;
-                default:
-                    LOG(ERROR) << "cache flash decoding attention do not support head dim " << head_dim;
-                    return ppl::common::RC_UNSUPPORTED;
+            auto kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<64, 4, 256, 8, 1, true>;
+            if (multi_block_size > 1) {
+                kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<64, 4, 256, 8, 32, true>;
+                switch (head_dim) {
+                    case 64:
+                        kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<64, 4, 256, 8, 32, true>;
+                        break;
+                    case 96:
+                        kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<96, 4, 256, 8, 32, true>;
+                        break;
+                    case 128:
+                        kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<128, 8, 256, 8, 16, true>;
+                        break;
+                    case 256:
+                        kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<256, 16, 256, 8, 8, true>;
+                        break;
+                    default:
+                        LOG(ERROR) << "cache flash decoding attention do not support head dim " << head_dim;
+                        return ppl::common::RC_UNSUPPORTED;
+                }
+            }
+            else {
+                switch (head_dim) {
+                    case 64:
+                        kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<64, 4, 256, 8, 1, true>;
+                        break;
+                    case 96:
+                        kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<96, 4, 256, 8, 1, true>;
+                        break;
+                    case 128:
+                        kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<128, 8, 256, 8, 1, true>;
+                        break;
+                    case 256:
+                        kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<256, 16, 256, 8, 1, true>;
+                        break;
+                    default:
+                        LOG(ERROR) << "cache flash decoding attention do not support head dim " << head_dim;
+                        return ppl::common::RC_UNSUPPORTED;
+                }
             }
             if (kernel_shm_size > RAW_SHM_SIZE) {
                 auto cuda_err = cudaFuncSetAttribute(kernel_fn, cudaFuncAttributeMaxDynamicSharedMemorySize, kernel_shm_size);
@@ -697,7 +859,7 @@ ppl::common::RetCode dynamic_batch_multi_head_cache_attention(
                     return ppl::common::RC_UNSUPPORTED;
                 }
             }
-            const dim3 grid_size = {(unsigned int)num_heads, (unsigned int)decoding_batches, 1};
+            const dim3 grid_size = {(unsigned int)num_heads, (unsigned int)decoding_batches, (unsigned int)multi_block_size};
             kernel_fn<<<grid_size, 256, kernel_shm_size, stream>>>(p);
         } else {
             LOG(ERROR) << "shm not enough, cache flash decoding attention is unsupported.";

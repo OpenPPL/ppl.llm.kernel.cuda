@@ -22,6 +22,8 @@
 
 namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pmx {
 
+uint64_t CalcMultiBlockSize(const int64_t grid_size, const int64_t max_kvlen, const int64_t head_dim);
+
 ppl::common::RetCode dynamic_batch_multi_head_cache_attention(
     const cudaStream_t stream,
     const cudaDeviceProp& device_prop,
@@ -52,6 +54,10 @@ ppl::common::RetCode dynamic_batch_multi_head_cache_attention(
     const int64_t cache_stride_l,
     const int64_t cache_stride_h,
     const int64_t cache_stride_kv,
+    void* multi_block_counter,
+    void* multi_block_max,
+    void* multi_block_sum,
+    void* multi_block_out,
     void* cache, // int8 (S, L, 2, KVH, D), (L, KVH, S, 2, D)
     void* scale, // float16 (S, L, 2, KVH, D/8), (L, KVH, S, 2, D/8)
     const ppl::common::TensorShape* output_shape,
