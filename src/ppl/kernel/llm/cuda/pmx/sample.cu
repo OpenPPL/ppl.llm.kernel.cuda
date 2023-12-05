@@ -185,12 +185,13 @@ fp32_t sample_block_reduce_sum(fp32_t reducing, fp32_t *shared_mem)
 template<int32_t TPB, int32_t VPT, int32_t TILE>
 __global__
 void flash_sample_top_p_kernel(
-    const fp32_t __restrict__ *logits,      // [num_batches, vocab_size]
+    const fp32_t __restrict__ *logits,      // [num_batches, batch_stride]
     const fp32_t *temperatures,             // [num_batches, 1]
-    fp32_t *sorted_value,                   // [num_batches, vocab_size]
-    int32_t *sorted_order,                  // [num_batches, vocab_size]
+    fp32_t *sorted_value,                   // [num_batches, padded_vocab_size]
+    int32_t *sorted_order,                  // [num_batches, padded_vocab_size]
     int32_t *output,                        // [num_batches, 1]
     const int32_t vocab_size,
+    const int32_t batch_stride,
     const fp32_t rnd,
     const fp32_t top_p)
 {
@@ -232,7 +233,7 @@ void flash_sample_top_p_kernel(
 
     // Stage 1. Block Internal Sort & Reducing Max
     const int64_t batch_id            = blockIdx.x;
-    const int64_t batch_offset        = batch_id * vocab_size;
+    const int64_t batch_offset        = batch_id * batch_stride;
     const int64_t padded_batch_offset = batch_id * pad_vocab<fp32_t, TPB>(vocab_size);
     const fp32_t  temperature         = max(abs(temperatures[batch_id]) + 1e-7, 0.01); // temperature 最低 0.01
 
@@ -354,14 +355,15 @@ int32_t flash_sample_top_p_get_pad_vocab_size(int32_t vocab_size) {
 
 ppl::common::RetCode flash_sample_top_p(
     cudaStream_t stream,
-    const float* logits, // [num_batches, vocab_size]
-    int32_t num_batches,
-    int32_t vocab_size, 
-    const float* temperatures,
+    const float* logits, // (batch, batch_stride)
+    const int32_t num_batches,
+    const int32_t vocab_size,
+    const int32_t batch_stride,
+    const float* temperatures, // (batch)
     const float top_p,
-    float* sorted_value,
-    int32_t* sorted_index,
-    int32_t* output)
+    float* sorted_value, // (batch, padded_vocab_szie)
+    int32_t* sorted_index, // (batch, padded_vocab_szie)
+    int32_t* output) // (batch)
 {
     /* Flash Sample Topp 
     
@@ -381,7 +383,7 @@ ppl::common::RetCode flash_sample_top_p(
         <<<num_batches, 256, 0, stream>>>(
             logits, temperatures,
             sorted_value, sorted_index,
-            output, vocab_size,
+            output, vocab_size, batch_stride,
             rand_val, top_p
         );
     } else if (vocab_size <= 262144) {
@@ -389,7 +391,7 @@ ppl::common::RetCode flash_sample_top_p(
         <<<num_batches, 256, 0, stream>>>(
             logits, temperatures,
             sorted_value, sorted_index,
-            output, vocab_size,
+            output, vocab_size, batch_stride,
             rand_val, top_p
         );
     } else {
@@ -404,8 +406,9 @@ ppl::common::RetCode flash_sample_top_p(
 template<int32_t TPB>
 __global__
 void sample_argmax_kernel(
-    const fp32_t* __restrict__ logits, // [batch, vocab_size] 
+    const fp32_t* __restrict__ logits, // [batch, batch_stride] 
     const int32_t vocab_size,
+    const int32_t batch_stride,
     int32_t* output)                   // [batch, 1]
 {
     const int64_t batch_id = blockIdx.x;
@@ -414,7 +417,7 @@ void sample_argmax_kernel(
 
     for(int32_t idx = threadIdx.x; idx < vocab_size; idx += TPB) {
         // fp32_t loading = __half2float(logits[batch_id * vocab_size + idx]);
-        fp32_t loading = logits[batch_id * vocab_size + idx];
+        fp32_t loading = logits[batch_id * batch_stride + idx];
         if(loading > selecting_value){
             selecting_value = loading;
             selection_idx   = idx;
@@ -436,12 +439,13 @@ void sample_argmax_kernel(
 
 ppl::common::RetCode sample_argmax(
     cudaStream_t stream,
-    const fp32_t* logits,
+    const float* logits, // (batch, batch_stride)
     const int32_t num_batches,
     const int32_t vocab_size,
-    int32_t* output)
+    const int32_t batch_stride,
+    int32_t* output) // (batch)
 {
-    sample_argmax_kernel<256><<<num_batches, 256, 0, stream>>>(logits, vocab_size, output);
+    sample_argmax_kernel<256><<<num_batches, 256, 0, stream>>>(logits, vocab_size, batch_stride, output);
 
     return ppl::common::RC_SUCCESS;
 }

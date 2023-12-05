@@ -26,21 +26,23 @@ int32_t flash_sample_top_p_get_pad_vocab_size(int32_t vocab_size);
 
 ppl::common::RetCode flash_sample_top_p(
     cudaStream_t stream,
-    const float* logits, // [num_batches, vocab_size]
-    int32_t num_batches,
-    int32_t vocab_size, 
-    const float* temperatures,  // [num_batches]
+    const float* logits, // (batch, batch_stride)
+    const int32_t num_batches,
+    const int32_t vocab_size,
+    const int32_t batch_stride,
+    const float* temperatures, // (batch)
     const float top_p,
-    float* sorted_value,  // [num_batches, pad_vocab_size]
-    int32_t* sorted_index,  // [num_batches, pad_vocab_size]
-    int32_t* output);  // [num_batches]
+    float* sorted_value, // (batch, padded_vocab_szie)
+    int32_t* sorted_index, // (batch, padded_vocab_szie)
+    int32_t* output); // (batch)
 
 ppl::common::RetCode sample_argmax(
     cudaStream_t stream,
-    const float* logits,  // [num_batches, vocab_size]
+    const float* logits, // (batch, batch_stride)
     const int32_t num_batches,
     const int32_t vocab_size,
-    int32_t* output);  // [num_batches]
+    const int32_t batch_stride,
+    int32_t* output); // (batch)
 
 }}}}}
 
