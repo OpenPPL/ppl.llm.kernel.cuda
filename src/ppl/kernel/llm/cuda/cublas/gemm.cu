@@ -18,6 +18,8 @@
 #include "ppl/kernel/llm/cuda/cublas/gemm.h"
 #include "ppl/common/log.h"
 
+#include "cudakernel/common/common.cuh"
+
 #include <cuda_fp16.h>
 
 namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace cublas {
@@ -110,6 +112,20 @@ ppl::common::RetCode gemm(
     CUBLAS_CHECK_RC(cublasLtMatrixLayoutCreate(&Bdesc, scaleType, cublas_transb == CUBLAS_OP_N ? N : K, cublas_transb == CUBLAS_OP_N ? K : N, ldb));
     CUBLAS_CHECK_RC(cublasLtMatrixLayoutCreate(&Cdesc, scaleType, N, M, ldc));
 
+    cublasLtMatmulPreference_t preference = nullptr;
+    constexpr int requested_algo = 1;
+    int returnedResults = 0;
+    cublasLtMatmulHeuristicResult_t heuristicResult[requested_algo] = { 0 };
+    if (algo == nullptr) {
+        CUBLAS_CHECK_RC(cublasLtMatmulPreferenceCreate(&preference));
+        CUBLAS_CHECK_RC(cublasLtMatmulPreferenceSetAttribute(preference,
+            CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &workspace_size, sizeof(workspace_size)));
+        // we just need the best available heuristic to try and run matmul. There is no guarantee this will work, e.g. if A
+        // is badly aligned, you can request more (e.g. 32) algos and try to run them one by one until something works
+        CUBLAS_CHECK_RC(cublasLtMatmulAlgoGetHeuristic(cublaslt_handle,
+            operationDesc, Bdesc, Adesc, Cdesc, Cdesc, preference, requested_algo, heuristicResult, &returnedResults));
+    }
+
     CUBLAS_CHECK_RC(cublasLtMatmul(
         cublaslt_handle,
         operationDesc,
@@ -123,7 +139,7 @@ ppl::common::RetCode gemm(
         Cdesc,
         C,
         Cdesc,
-        algo,
+        algo != nullptr ? algo : &heuristicResult[0].algo,
         workspace,
         workspace_size,
         stream));
