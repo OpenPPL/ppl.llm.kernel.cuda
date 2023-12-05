@@ -25,7 +25,7 @@ namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pm
 bool is_config_valid(const TileShape& tile_shape, int M, int N, int K, int workspace_size, const int splitk_factor,
                      const int group_size) {
     const size_t workspace_size_min = splitk_factor * M * N * 4 * sizeof(half);
-    if (splitk_factor > 1 && workspace_size < workspace_size_min) {
+    if (splitk_factor > 1 && (size_t)workspace_size < workspace_size_min) {
         return false;
     }
 
@@ -132,13 +132,13 @@ GemmConfig estimate_best_config_from_occupancies(const std::vector<GemmConfig>& 
                                                  const size_t workspace_bytes, const int multi_processor_count,
                                                  const int group_size) {
     GemmConfig best_config;
-    ScoreComponent best_score;
+    ScoreComponent best_score{0};
     float best_score_f = std::numeric_limits<float>::max();
 
     int current_m_tile = 0;
 
     const int max_split_k = n >= multi_processor_count * 256 ? 1 : split_k_limit;
-    for (int ii = 0; ii < candidate_configs.size(); ++ii) {
+    for (int ii = 0; ii < (int)candidate_configs.size(); ++ii) {
         GemmConfig candidate_config = candidate_configs[ii];
         TileShape tile_shape = get_cta_shape_for_config(candidate_config.tile_config);
         if (tile_shape.m == 0)
@@ -167,7 +167,7 @@ GemmConfig estimate_best_config_from_occupancies(const std::vector<GemmConfig>& 
                 const float num_waves_fractional = ctas_for_problem / float(ctas_per_wave);
                 const float current_score = float(num_waves_total) - num_waves_fractional;
                 const int ctas_tails = ctas_for_problem - (num_waves_total - 1) * ctas_per_wave;
-                float block_tail = 0;
+                // float block_tail = 0;
                 if (ctas_tails % multi_processor_count != 0) {
                     float block_tail = float(1.0) - ctas_tails % multi_processor_count / float(multi_processor_count);
                 }
@@ -223,8 +223,7 @@ GemmConfig estimate_best_config_from_occupancies(const std::vector<GemmConfig>& 
                     current_score_component.is_prefer_big_k = (k / n > 8) ? true : false;
                     current_score_component.m = m;
 
-                    if (best_config.tile_config == TileConfig::ChooseWithHeuristic ||
-                        (!(best_score < current_score_component))) {
+                    if (best_config.tile_config == TileConfig::ChooseWithHeuristic || (!(best_score < current_score_component))) {
                         SplitKStyle split_style = split_k_factor > 1 ? SplitKStyle::SPLIT_K : SplitKStyle::NO_SPLIT_K;
 
                         best_score = current_score_component;
