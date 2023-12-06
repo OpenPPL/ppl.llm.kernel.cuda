@@ -22,9 +22,49 @@
 
 namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pmx {
 
-uint64_t CalcMultiBlockSize(const int64_t grid_size, const int64_t max_kvlen, const int64_t head_dim);
+struct dynamic_batch_multi_head_cache_attention_config {
+    void* query;
+    void* output;
+    void* cache;
+    void* scale;
+    void* cachestarts;
+    void* kvstarts;
+    float attn_scale;
+    int64_t layer_idx;
+    int64_t kv_head_shift;       // !!! Use this if (num_heads/num_kv_heads) is power of 2  or zero, otherwise set SHIFT_KV to false.
+    int64_t num_kv_repeats;       // And then we will use this one to compute kv_head_idx, but the performance will lost 10%
+    int64_t q_stride_s;
+    int64_t k_stride_s;
+    int64_t v_stride_s;
+    int64_t o_stride_s;
+    int64_t cache_stride_s;
+    int64_t cache_stride_l;
+    int64_t cache_stride_h;
+    int64_t cache_stride_kv;
 
-ppl::common::RetCode dynamic_batch_multi_head_cache_attention(
+    ppl::common::TensorShape* query_shape;
+    void* current_key;
+    void* current_value;
+    void* seqstarts;
+    int64_t prefill_batches;
+    int64_t decoding_batches;
+    int64_t max_seqlen;
+    int64_t max_kvlen;
+    int64_t num_heads;
+    int64_t num_kv_heads;
+    int64_t head_dim;
+    bool is_causal;
+
+    int64_t threads_per_block;
+    int64_t decoding_shm_size;
+    int64_t multi_block_size;
+    int64_t multi_block_output_size;
+    int64_t multi_block_sum_size;
+    int64_t multi_block_counter_size;
+    void* multi_block_tmpbuffer;
+};
+
+ppl::common::RetCode dynamic_batch_multi_head_cache_attention_prepare(
     const cudaStream_t stream,
     const cudaDeviceProp& device_prop,
     const ppl::common::TensorShape* query_shape,
@@ -54,14 +94,17 @@ ppl::common::RetCode dynamic_batch_multi_head_cache_attention(
     const int64_t cache_stride_l,
     const int64_t cache_stride_h,
     const int64_t cache_stride_kv,
-    void* multi_block_counter,
-    void* multi_block_max,
-    void* multi_block_sum,
-    void* multi_block_out,
     void* cache, // int8 (S, L, 2, KVH, D), (L, KVH, S, 2, D)
     void* scale, // float16 (S, L, 2, KVH, D/8), (L, KVH, S, 2, D/8)
     const ppl::common::TensorShape* output_shape,
-    void* output); // (S, .., D)
+    void* output,
+    int64_t* multi_block_buffer_size,
+    dynamic_batch_multi_head_cache_attention_config* config); // (S, .., D)
+
+ppl::common::RetCode dynamic_batch_multi_head_cache_attention(
+    const cudaStream_t stream,
+    const cudaDeviceProp& device_prop,
+    dynamic_batch_multi_head_cache_attention_config config);
 
 }}}}}
 
