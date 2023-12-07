@@ -1011,7 +1011,7 @@ ppl::common::RetCode dynamic_batch_multi_head_cache_attention(
                 p.multi_block.partial_max   = reinterpret_cast<float*>((char*)multi_block_tmpbuffer + multi_block_output_size);
                 p.multi_block.partial_sum   = reinterpret_cast<float*>((char*)multi_block_tmpbuffer + multi_block_output_size + multi_block_sum_size);
                 p.multi_block.block_counter = reinterpret_cast<int32_t*>((char*)multi_block_tmpbuffer + multi_block_output_size + multi_block_sum_size * 2);
-                cudaMemset(p.multi_block.block_counter, 0, multi_block_counter_size);
+                cudaMemsetAsync(p.multi_block.block_counter, 0, multi_block_counter_size, stream);
 
                 status = dynamic_batching_dynamic_threads_decoding_cache_attention<256, true>(
                     stream,
