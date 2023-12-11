@@ -61,6 +61,7 @@ struct dynamic_batching_kv_cache_quantize_kernel_param {
     int64_t num_layer;
     int64_t layer_idx;
     int64_t num_kv_heads;
+    int64_t head_dim;
     int64_t current_key_stride_s;
     int64_t current_value_stride_s;
     int64_t cache_stride_s;
@@ -71,27 +72,27 @@ struct dynamic_batching_kv_cache_quantize_kernel_param {
     half* scale;
 };
 
-template<int32_t HEAD_SIZE, int32_t VPT, int32_t TPB> // 8 fp16 occupy 128 bytes, which can be loaded by a single thread at once.
+template<int32_t VPT, int32_t TPB> // 8 fp16 occupy 128 bytes, which can be loaded by a single thread at once.
 __global__
 void dynamic_batching_kv_cache_quantize_kernel(dynamic_batching_kv_cache_quantize_kernel_param p)
 {
     if (blockIdx.y < p.seqstarts[blockIdx.x + 1] - p.seqstarts[blockIdx.x]) {
-        constexpr int64_t thd_per_head_size = HEAD_SIZE / VPT;
+        const int64_t thr_per_head_size = p.head_dim / VPT;
         const int64_t batch_id = blockIdx.x;
         const int64_t seq_idx = blockIdx.y;
         const int64_t tid = blockIdx.z * TPB + threadIdx.x;
 
-        if (tid < HEAD_SIZE * p.num_kv_heads / VPT) {
+        if (tid < p.head_dim * p.num_kv_heads / VPT) {
             const int64_t input_token_idx = p.seqstarts[batch_id] + seq_idx;
             const int64_t cache_token_idx = p.cachestarts[batch_id] + seq_idx + p.start_pos[batch_id];
             const int64_t key_out_offset = cache_token_idx * p.cache_stride_s + p.layer_idx * p.cache_stride_l;
             auto key_in_ptr = p.current_key + input_token_idx * p.current_key_stride_s;
             auto value_in_ptr = p.current_value + input_token_idx * p.current_value_stride_s;
 
-            const int64_t kv_head_idx = tid / thd_per_head_size;
-            const int64_t dim_idx = (tid % thd_per_head_size) * VPT;
+            const int64_t kv_head_idx = tid / thr_per_head_size;
+            const int64_t dim_idx = (tid % thr_per_head_size) * VPT;
             const int64_t scale_dim_idx = dim_idx / VPT;
-            const int64_t input_idx = kv_head_idx * HEAD_SIZE + dim_idx;
+            const int64_t input_idx = kv_head_idx * p.head_dim + dim_idx;
 
             half key_in[VPT]; int8_t key_out[VPT];
             half value_in[VPT]; int8_t value_out[VPT];
@@ -444,7 +445,7 @@ void dynamic_batching_decoding_cache_attention_fp16_kernel(dynamic_batching_deco
     for (int64_t base_id = warp_id * GPW; base_id < block_context_len; base_id += GPT) {
         const int64_t block_context_id = base_id + group_id;
         // all thread groups within a warp must be launched together.
-        if (block_context_id < block_context_len){
+        if (block_context_id < block_context_len) {
             const int64_t value_offset
                             = (cache_offset_s + block_base_id + block_context_id) * p.cache_stride_s
                             + p.layer_idx * p.cache_stride_l
@@ -565,10 +566,8 @@ void dynamic_batching_decoding_cache_attention_fp16_kernel(dynamic_batching_deco
 
         bool last_block = false;
         // Make sure every block finishs the partial computation.
-        if (threadIdx.x == 0)
-        {
-            if (atomicAdd(&p.multi_block.block_counter[head_idx * batch_size + batch_idx], 1) == MULTI_BLOCK - 1)
-            {
+        if (threadIdx.x == 0) {
+            if (atomicAdd(&p.multi_block.block_counter[head_idx * batch_size + batch_idx], 1) == MULTI_BLOCK - 1) {
                 last_block = true;
             }
         }
@@ -634,9 +633,8 @@ void dynamic_batching_decoding_cache_attention_fp16_kernel(dynamic_batching_deco
     }
 }
 
-
-
-ppl::common::RetCode dynamic_batch_multi_head_cache_attention_prepare(
+std::pair<ppl::common::RetCode, dynamic_batch_multi_head_cache_attention_config>
+dynamic_batch_multi_head_cache_attention_prepare(
     const cudaStream_t stream,
     const cudaDeviceProp& device_prop,
     const ppl::common::TensorShape* query_shape,
@@ -669,40 +667,35 @@ ppl::common::RetCode dynamic_batch_multi_head_cache_attention_prepare(
     void* cache, // int8 (S, L, 2, KVH, D), (L, KVH, S, 2, D)
     void* scale, // float16 (S, L, 2, KVH, D/8), (L, KVH, S, 2, D/8)
     const ppl::common::TensorShape* output_shape,
-    void* output, // (S, .., D)
-    int64_t* multi_block_buffer_size,
-    dynamic_batch_multi_head_cache_attention_config* config)
+    void* output) // (S, .., D)
 {
+    dynamic_batch_multi_head_cache_attention_config config;
+
     if (query_shape->GetDim(1) != num_heads) {
         LOG(ERROR) << "currnetly do not support leading dim on query's num_heads";
-        return ppl::common::RC_UNSUPPORTED;
+        return {ppl::common::RC_UNSUPPORTED, config};
     }
 
     if (output_shape->GetDim(1) != num_heads) {
         LOG(ERROR) << "currnetly do not support leading dim on output's num_heads";
-        return ppl::common::RC_UNSUPPORTED;
+        return {ppl::common::RC_UNSUPPORTED, config};
     }
 
     if (current_key_shape->GetDim(1) != num_kv_heads) {
         LOG(ERROR)
             << "currnetly do not support leading dim on current_key's num_kv_heads";
-        return ppl::common::RC_UNSUPPORTED;
+        return {ppl::common::RC_UNSUPPORTED, config};
     }
 
     if (current_value_shape->GetDim(1) != num_kv_heads) {
         LOG(ERROR)
             << "currnetly do not support leading dim on current_value's num_kv_heads";
-        return ppl::common::RC_UNSUPPORTED;
-    }
-
-    if (attn_mask != nullptr) {
-        LOG(ERROR) << "currnetly do not support attn_mask";
-        return ppl::common::RC_UNSUPPORTED;
+        return {ppl::common::RC_UNSUPPORTED, config};
     }
 
     if (cache_mode != 0) {
         LOG(ERROR) << "currently only support cache_mode == 0";
-        return ppl::common::RC_UNSUPPORTED;
+        return {ppl::common::RC_UNSUPPORTED, config};
     }
 
     int64_t kv_head_shift = 0;
@@ -711,7 +704,7 @@ ppl::common::RetCode dynamic_batch_multi_head_cache_attention_prepare(
         ++kv_head_shift;
     if ((num_kv_heads << kv_head_shift) != num_heads) {
         LOG(ERROR) << "currently only support (num_heads/num_kv_heads) is power of 2 or zero.";
-        return ppl::common::RC_UNSUPPORTED;
+        return {ppl::common::RC_UNSUPPORTED, config};
     }
 
     const int64_t prefill_batches = batch - decoding_batches;
@@ -722,63 +715,25 @@ ppl::common::RetCode dynamic_batch_multi_head_cache_attention_prepare(
     const int64_t v_stride_s = current_value_shape->GetDim(1) * head_dim;
     const int64_t o_stride_s = output_shape->GetDim(1) * head_dim;
 
+    const int64_t decoding_attention_total_blocks = num_heads * decoding_batches;
+    const int32_t multi_processor_count = device_prop.multiProcessorCount;
+
     constexpr int64_t TPB = 256;
     constexpr int64_t VPT = 8;
 
-    if (num_heads != num_kv_heads) {
-        LOG(ERROR) << "currently do not support GQA, whose num_heads != num_kv_heads";
-        return ppl::common::RC_UNSUPPORTED;
-    }
-
-    {
-        if (head_dim != 128) {
-            LOG(ERROR) << "currently kv_cache_quantize_kernel only support head_dim == 128.";
-            return ppl::common::RC_UNSUPPORTED;
-        }
-        dim3 grid(batch, max_seqlen, (num_kv_heads * head_dim / VPT + TPB - 1) / TPB);
-        dynamic_batching_kv_cache_quantize_kernel<128, VPT, TPB><<<grid, TPB, 0, stream>>>(
-            {(half*)current_key,
-            (half*)current_value,
-            (int64_t*)seqstarts,
-            (int64_t*)cachestarts,
-            (int64_t*)start_pos,
-            num_layer,
-            layer_idx,
-            num_kv_heads,
-            k_stride_s,
-            v_stride_s,
-            cache_stride_s,
-            cache_stride_l,
-            cache_stride_h,
-            cache_stride_kv,
-            (int8_t*)cache,
-            (half*)scale});
-    }
-
-    const int64_t kernel_total_blocks = num_heads * decoding_batches;
-
-    // get sm num
-    int32_t device_id;
-    int32_t multi_processor_count;
-    cudaGetDevice(&device_id);
-    cudaDeviceGetAttribute(&multi_processor_count, cudaDevAttrMultiProcessorCount, device_id);
-
     // get multi block size
-    int64_t multi_block_size = 1;
-    if (decoding_batches > 0 && kernel_total_blocks < multi_processor_count && max_kvlen >= 1024) {
-        int64_t tmp_size = TPB / (head_dim / VPT);
-        while (multi_block_size < tmp_size) {
-            multi_block_size <<= 1;
+    int64_t decoding_multi_block_size = 1;
+    if (decoding_batches > 0 && decoding_attention_total_blocks < multi_processor_count && max_kvlen >= 1024) {
+        while (decoding_multi_block_size < TPB / (head_dim / VPT)) {
+            decoding_multi_block_size <<= 1;
         }
     }
 
     // get block size
-    int64_t threads_per_block;
-    if (multi_block_size > 1 || decoding_batches == 0) {
-        threads_per_block = TPB;
-    }
-    else {
-        // threads_per_block = 512;
+    int64_t decoding_threads_per_block;
+    if (decoding_multi_block_size > 1 || decoding_batches == 0) {
+        decoding_threads_per_block = TPB;
+    } else {
         int32_t num_blocks_per_sm = -1;
         auto kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<64, 4, TPB, 8, 1, true>;
         switch (head_dim) {
@@ -796,20 +751,20 @@ ppl::common::RetCode dynamic_batch_multi_head_cache_attention_prepare(
                 break;
             default:
                 LOG(ERROR) << "cache flash decoding attention do not support head dim " << head_dim;
-                return ppl::common::RC_UNSUPPORTED;
+                return {ppl::common::RC_UNSUPPORTED, config};
         }
         cudaOccupancyMaxActiveBlocksPerMultiprocessor(&num_blocks_per_sm, kernel_fn, TPB, 0);
-        int64_t block_size_factor = (multi_processor_count * num_blocks_per_sm + kernel_total_blocks - 1) / kernel_total_blocks;
-        block_size_factor = min(block_size_factor, (int64_t)num_blocks_per_sm);
-        threads_per_block = min(TPB * block_size_factor, 1024L);
-        if (threads_per_block <= 256) {
-            threads_per_block = 256;
+        int64_t block_size_factor = (multi_processor_count * num_blocks_per_sm + decoding_attention_total_blocks - 1) / decoding_attention_total_blocks;
+        block_size_factor = std::min<int64_t>(block_size_factor, num_blocks_per_sm);
+        decoding_threads_per_block = std::min<int64_t>(TPB * block_size_factor, 1024);
+        if (decoding_threads_per_block <= 256) {
+            decoding_threads_per_block = 256;
         }
-        else if (threads_per_block <= 512) {
-            threads_per_block = 512;
+        else if (decoding_threads_per_block <= 512) {
+            decoding_threads_per_block = 512;
         }
         else {
-            threads_per_block = 1024;
+            decoding_threads_per_block = 1024;
         }
     }
 
@@ -817,69 +772,84 @@ ppl::common::RetCode dynamic_batch_multi_head_cache_attention_prepare(
     int64_t decoding_shm_size = 0;
     if(decoding_batches > 0) {
         constexpr int64_t WARP_SIZE = 32;
-        const int64_t WPT = threads_per_block / WARP_SIZE;
-        const int64_t reduce_shm_size = threads_per_block / WARP_SIZE * sizeof(float);
-        const int64_t max_multi_block_kvlen = (max_kvlen * sizeof(float) + multi_block_size - 1) / multi_block_size;
+        const int64_t WPT = decoding_threads_per_block / WARP_SIZE;
+        const int64_t reduce_shm_size = decoding_threads_per_block / WARP_SIZE * sizeof(float);
+        const int64_t max_multi_block_kvlen = (max_kvlen * sizeof(float) + decoding_multi_block_size - 1) / decoding_multi_block_size;
         const int64_t logits_size = max(max_multi_block_kvlen, WPT * head_dim * sizeof(float));
         decoding_shm_size = reduce_shm_size + logits_size;
     }
 
-    config->query           = const_cast<void*>(query);
-    config->output          = output;
-    config->cache           = cache;
-    config->scale           = scale;
-    config->cachestarts     = const_cast<void*>(cachestarts);
-    config->kvstarts        = const_cast<void*>(kvstarts);
-    config->attn_scale      = attn_scale;
-    config->layer_idx       = layer_idx;
-    config->kv_head_shift   = kv_head_shift;
-    config->num_kv_repeats  = kv_repeats;
-    config->q_stride_s      = q_stride_s;
-    config->k_stride_s      = k_stride_s;
-    config->v_stride_s      = v_stride_s;
-    config->o_stride_s      = o_stride_s;
-    config->cache_stride_s  = cache_stride_s;
-    config->cache_stride_l  = cache_stride_l;
-    config->cache_stride_h  = cache_stride_h;
-    config->cache_stride_kv = cache_stride_kv;
+    config.device_prop = const_cast<cudaDeviceProp*>(&device_prop);
+    config.query_shape = const_cast<ppl::common::TensorShape*>(query_shape);
+    config.query = const_cast<void*>(query);
+    config.current_key_shape = const_cast<ppl::common::TensorShape*>(current_key_shape);
+    config.current_key = const_cast<void*>(current_key);
+    config.current_value_shape = const_cast<ppl::common::TensorShape*>(current_value_shape);
+    config.current_value = const_cast<void*>(current_value);
+    config.attn_mask_shape = const_cast<ppl::common::TensorShape*>(attn_mask_shape);
+    config.attn_mask = const_cast<void*>(attn_mask);
 
-    config->query_shape         = const_cast<ppl::common::TensorShape*>(query_shape);
-    config->current_key         = const_cast<void*>(current_key);
-    config->current_value       = const_cast<void*>(current_value);
-    config->seqstarts           = const_cast<void*>(seqstarts);
-    config->prefill_batches     = prefill_batches;
-    config->decoding_batches    = decoding_batches;
-    config->max_seqlen          = max_seqlen;
-    config->max_kvlen           = max_kvlen;
-    config->num_heads           = num_heads;
-    config->head_dim            = head_dim;
-    config->num_kv_heads        = num_kv_heads;
-    config->is_causal           = is_causal;
+    config.seqstarts = const_cast<void*>(seqstarts);
+    config.kvstarts = const_cast<void*>(kvstarts);
+    config.cachestarts = const_cast<void*>(cachestarts);
+    config.start_pos = const_cast<void*>(start_pos);
 
-    config->threads_per_block           = threads_per_block;
-    config->decoding_shm_size           = decoding_shm_size;
-    config->multi_block_size            = multi_block_size;
-    config->multi_block_output_size     = decoding_batches * num_heads * head_dim * multi_block_size * sizeof(half);
-    config->multi_block_sum_size        = decoding_batches * num_heads * multi_block_size * sizeof(float);
-    config->multi_block_counter_size    = decoding_batches * num_heads * sizeof(int32_t);
-    config->multi_block_tmpbuffer       = nullptr;
+    config.cache = cache;
+    config.scale = scale;
 
-    *multi_block_buffer_size = config->multi_block_output_size + config->multi_block_sum_size*2 + config->multi_block_counter_size;
+    config.output_shape = const_cast<ppl::common::TensorShape*>(output_shape);
+    config.output = output;
 
-    return ppl::common::RC_SUCCESS;
+    config.is_causal = is_causal;
+    config.batch = batch;
+    config.decoding_batches = decoding_batches;
+    config.max_seqlen = max_seqlen;
+    config.max_kvlen = max_kvlen;
+    config.layer_idx =layer_idx;
+    config.num_layer = num_layer;
+    config.num_heads = num_heads;
+    config.num_kv_heads = num_kv_heads;
+    config.head_dim = head_dim;
+    config.cache_mode = cache_mode;
+    config.cache_stride_s = cache_stride_s;
+    config.cache_stride_l = cache_stride_l;
+    config.cache_stride_h = cache_stride_h;
+    config.cache_stride_kv = cache_stride_kv;
+
+    config.prefill_batches = prefill_batches;
+    config.q_stride_s = q_stride_s;
+    config.k_stride_s = k_stride_s;
+    config.v_stride_s = v_stride_s;
+    config.o_stride_s = o_stride_s;
+
+    config.attn_scale = attn_scale;
+    config.kv_head_shift = kv_head_shift;       // !!! Use this if (num_heads/num_kv_heads) is power of 2  or zero, otherwise set SHIFT_KV to false = .
+    config.num_kv_repeats = kv_repeats;       // And then we will use this one to compute kv_head_idx, but the performance will lost 10 = %
+
+    config.decoding_threads_per_block = decoding_threads_per_block;
+    config.decoding_shm_size = decoding_shm_size;
+    config.decoding_multi_block_size = decoding_multi_block_size;
+    config.decoding_multi_block_output_size = decoding_batches * num_heads * head_dim * decoding_multi_block_size * sizeof(half);;
+    config.decoding_multi_block_sum_size = decoding_batches * num_heads * decoding_multi_block_size * sizeof(float);
+    config.decoding_multi_block_max_size = decoding_batches * num_heads * decoding_multi_block_size * sizeof(float);
+    config.decoding_multi_block_counter_size = decoding_batches * num_heads * sizeof(int32_t);
+
+    config.temp_buffer_size
+        = config.decoding_multi_block_output_size
+        + config.decoding_multi_block_sum_size
+        + config.decoding_multi_block_max_size
+        + config.decoding_multi_block_counter_size;
+    config.temp_buffer = nullptr;
+
+    return {ppl::common::RC_SUCCESS, config};
 }
 
 
-
 template<int32_t TPB, bool DO_MULTI_BLOCK>
-ppl::common::RetCode dynamic_batching_dynamic_threads_decoding_cache_attention(
+ppl::common::RetCode dynamic_batching_decoding_cache_attention(
     const cudaStream_t stream,
-    const int64_t num_heads,
-    const int64_t head_dim,
-    const int64_t decoding_batches,
-    const int64_t kernel_shm_size,
-    const int64_t multi_block_size,
-    dynamic_batching_decoding_cache_attention_kernel_param p
+    const dynamic_batch_multi_head_cache_attention_config &cfg,
+    const dynamic_batching_decoding_cache_attention_kernel_param &p
 )
 {
     const int64_t RAW_SHM_SIZE = 48 * 1024;
@@ -887,7 +857,7 @@ ppl::common::RetCode dynamic_batching_dynamic_threads_decoding_cache_attention(
     auto kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<64, 4, TPB, 8, 1, true>;
     if (DO_MULTI_BLOCK) {
         kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<64, 4, TPB, 8, 32, true>;
-        switch (head_dim) {
+        switch (cfg.head_dim) {
             case 64:
                 kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<64, 4, TPB, 8, 32, true>;
                 break;
@@ -901,11 +871,11 @@ ppl::common::RetCode dynamic_batching_dynamic_threads_decoding_cache_attention(
                 kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<256, 16, TPB, 8, 8, true>;
                 break;
             default:
-                LOG(ERROR) << "cache flash decoding attention do not support head dim " << head_dim;
+                LOG(ERROR) << "cache flash decoding attention do not support head dim " << cfg.head_dim;
                 return ppl::common::RC_UNSUPPORTED;
         }
     } else {
-        switch (head_dim) {
+        switch (cfg.head_dim) {
             case 64:
                 kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<64, 4, TPB, 8, 1, true>;
                 break;
@@ -919,19 +889,22 @@ ppl::common::RetCode dynamic_batching_dynamic_threads_decoding_cache_attention(
                 kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<256, 16, TPB, 8, 1, true>;
                 break;
             default:
-                LOG(ERROR) << "cache flash decoding attention do not support head dim " << head_dim;
+                LOG(ERROR) << "cache flash decoding attention do not support head dim " << cfg.head_dim;
                 return ppl::common::RC_UNSUPPORTED;
         }
     }
-    if (kernel_shm_size > RAW_SHM_SIZE) {
-        auto cuda_err = cudaFuncSetAttribute(kernel_fn, cudaFuncAttributeMaxDynamicSharedMemorySize, kernel_shm_size);
+    if (cfg.decoding_shm_size > RAW_SHM_SIZE) {
+        auto cuda_err = cudaFuncSetAttribute(kernel_fn, cudaFuncAttributeMaxDynamicSharedMemorySize, cfg.decoding_shm_size);
         if (cuda_err == cudaErrorInvalidValue) {
             LOG(ERROR) << "this gpu does not have enough shared-memory cache flash decoding attention requires";
             return ppl::common::RC_UNSUPPORTED;
         }
     }
-    const dim3 grid_size = {(unsigned int)num_heads, (unsigned int)decoding_batches, (unsigned int)multi_block_size};
-    kernel_fn<<<grid_size, TPB, kernel_shm_size, stream>>>(p);
+    const dim3 grid_size = {
+        (unsigned int)cfg.num_heads,
+        (unsigned int)cfg.decoding_batches,
+        (unsigned int)cfg.decoding_multi_block_size};
+    kernel_fn<<<grid_size, TPB, cfg.decoding_shm_size, stream>>>(p);
 
     return ppl::common::RC_SUCCESS;
 }
@@ -940,116 +913,83 @@ ppl::common::RetCode dynamic_batching_dynamic_threads_decoding_cache_attention(
 
 ppl::common::RetCode dynamic_batch_multi_head_cache_attention(
     const cudaStream_t stream,
-    const cudaDeviceProp& device_prop,
-    dynamic_batch_multi_head_cache_attention_config config) // (S, .., D)
+    const dynamic_batch_multi_head_cache_attention_config &cfg) // (S, .., D)
 {
-    void* query         = config.query;
-    void* output        = config.output;
-    void* cache         = config.cache;
-    void* scale         = config.scale;
-    void* cachestarts   = config.cachestarts;
-    void* kvstarts      = config.kvstarts;
-    const float attn_scale          = config.attn_scale;
-    const int64_t layer_idx         = config.layer_idx;
-    const int64_t kv_head_shift     = config.kv_head_shift;
-    const int64_t num_kv_repeats    = config.num_kv_repeats;
-    const int64_t q_stride_s        = config.q_stride_s;
-    const int64_t k_stride_s        = config.k_stride_s;
-    const int64_t v_stride_s        = config.v_stride_s;
-    const int64_t o_stride_s        = config.o_stride_s;
-    const int64_t cache_stride_s    = config.cache_stride_s;
-    const int64_t cache_stride_l    = config.cache_stride_l;
-    const int64_t cache_stride_h    = config.cache_stride_h;
-    const int64_t cache_stride_kv   = config.cache_stride_kv;
+    {
+        constexpr int64_t TPB = 256;
+        constexpr int64_t VPT = 8;
 
-    ppl::common::TensorShape* query_shape = config.query_shape;
-    void* current_key   = config.current_key;
-    void* current_value = config.current_value;
-    void* seqstarts     = config.seqstarts;
-    const int64_t prefill_batches   = config.prefill_batches;
-    const int64_t decoding_batches  = config.decoding_batches;
-    const int64_t max_seqlen        = config.max_seqlen;
-    const int64_t max_kvlen         = config.max_kvlen;
-    const int64_t num_heads         = config.num_heads;
-    const int64_t num_kv_heads      = config.num_kv_heads;
-    const int64_t head_dim          = config.head_dim;
-    const bool is_causal            = config.is_causal;
+        if (cfg.head_dim % VPT != 0) {
+            LOG(ERROR) << "head_dim must be aligned with " << VPT << ", currently get " << cfg.head_dim;
+            return ppl::common::RC_UNSUPPORTED;
+        }
+
+        dim3 grid(cfg.batch, cfg.max_seqlen, (cfg.num_kv_heads * cfg.head_dim / VPT + TPB - 1) / TPB);
+        dynamic_batching_kv_cache_quantize_kernel<VPT, TPB><<<grid, TPB, 0, stream>>>(
+            {(half*)cfg.current_key,
+            (half*)cfg.current_value,
+            (int64_t*)cfg.seqstarts,
+            (int64_t*)cfg.cachestarts,
+            (int64_t*)cfg.start_pos,
+            cfg.num_layer,
+            cfg.layer_idx,
+            cfg.num_kv_heads,
+            cfg.head_dim,
+            cfg.k_stride_s,
+            cfg.v_stride_s,
+            cfg.cache_stride_s,
+            cfg.cache_stride_l,
+            cfg.cache_stride_h,
+            cfg.cache_stride_kv,
+            (int8_t*)cfg.cache,
+            (half*)cfg.scale});
+    }
 
     struct dynamic_batching_decoding_cache_attention_kernel_param p;
-    p.query = (half*)query;
-    p.output = (half*)output;
-    p.cache = (int8_t*)cache;
-    p.scale = (half*)scale;
-    p.cachestarts = (int64_t*)cachestarts;
-    p.kvstarts = (int64_t*)kvstarts;
-    p.attn_scale = attn_scale;
-    p.layer_idx = layer_idx;
-    p.kv_head_shift = kv_head_shift;
-    p.num_kv_repeats = num_kv_repeats;
-    p.query_stride_s = q_stride_s;
-    p.output_stride_s = o_stride_s;
-    p.cache_stride_s = cache_stride_s;
-    p.cache_stride_l = cache_stride_l;
-    p.cache_stride_h = cache_stride_h;
-    p.cache_stride_kv = cache_stride_kv;
+    p.query = (half*)cfg.query;
+    p.output = (half*)cfg.output;
+    p.cache = (int8_t*)cfg.cache;
+    p.scale = (half*)cfg.scale;
+    p.cachestarts = (int64_t*)cfg.cachestarts;
+    p.kvstarts = (int64_t*)cfg.kvstarts;
+    p.attn_scale = cfg.attn_scale;
+    p.layer_idx = cfg.layer_idx;
+    p.kv_head_shift = cfg.kv_head_shift;
+    p.num_kv_repeats = cfg.num_kv_repeats;
+    p.query_stride_s = cfg.q_stride_s;
+    p.output_stride_s = cfg.o_stride_s;
+    p.cache_stride_s = cfg.cache_stride_s;
+    p.cache_stride_l = cfg.cache_stride_l;
+    p.cache_stride_h = cfg.cache_stride_h;
+    p.cache_stride_kv = cfg.cache_stride_kv;
 
-    if(decoding_batches > 0) {
-        const int64_t MAX_SHM_SIZE = device_prop.sharedMemPerBlockOptin;
+    if(cfg.decoding_batches > 0) {
+        const int64_t MAX_SHM_SIZE = cfg.device_prop->sharedMemPerBlockOptin;
 
-        const int64_t kernel_shm_size           = config.decoding_shm_size;
-        const int64_t threads_per_block         = config.threads_per_block;
-        const int64_t multi_block_size          = config.multi_block_size;
-        const int64_t multi_block_sum_size      = config.multi_block_sum_size;
-        const int64_t multi_block_counter_size  = config.multi_block_counter_size;
-        const int64_t multi_block_output_size   = config.multi_block_output_size;
-        void* multi_block_tmpbuffer       = config.multi_block_tmpbuffer;
-
-        if (kernel_shm_size <= MAX_SHM_SIZE) {
-            ppl::common::RetCode status;
-            if (multi_block_size > 1) {
-                p.multi_block.partial_out   = (half*)multi_block_tmpbuffer;
-                p.multi_block.partial_max   = reinterpret_cast<float*>((char*)multi_block_tmpbuffer + multi_block_output_size);
-                p.multi_block.partial_sum   = reinterpret_cast<float*>((char*)multi_block_tmpbuffer + multi_block_output_size + multi_block_sum_size);
-                p.multi_block.block_counter = reinterpret_cast<int32_t*>((char*)multi_block_tmpbuffer + multi_block_output_size + multi_block_sum_size * 2);
-                cudaMemsetAsync(p.multi_block.block_counter, 0, multi_block_counter_size, stream);
-
-                status = dynamic_batching_dynamic_threads_decoding_cache_attention<256, true>(
-                    stream,
-                    num_heads,
-                    head_dim,
-                    decoding_batches,
-                    kernel_shm_size,
-                    multi_block_size,
-                    p);
-            } else if (threads_per_block == 256) {
-                status = dynamic_batching_dynamic_threads_decoding_cache_attention<256, false>(
-                    stream,
-                    num_heads,
-                    head_dim,
-                    decoding_batches,
-                    kernel_shm_size,
-                    multi_block_size,
-                    p);
-            } else if (threads_per_block == 512) {
-                status = dynamic_batching_dynamic_threads_decoding_cache_attention<512, false>(
-                    stream,
-                    num_heads,
-                    head_dim,
-                    decoding_batches,
-                    kernel_shm_size,
-                    multi_block_size,
-                    p);
-            } else {
-                status = dynamic_batching_dynamic_threads_decoding_cache_attention<1024, false>(
-                    stream,
-                    num_heads,
-                    head_dim,
-                    decoding_batches,
-                    kernel_shm_size,
-                    multi_block_size,
-                    p);
+        if (cfg.decoding_shm_size <= MAX_SHM_SIZE) {
+            ppl::common::RetCode status = ppl::common::RC_UNSUPPORTED;
+            if (cfg.decoding_multi_block_size > 1) {
+                p.multi_block.partial_out   = (half*)cfg.temp_buffer;
+                p.multi_block.partial_max   = reinterpret_cast<float*>((char*)cfg.temp_buffer
+                    + cfg.decoding_multi_block_output_size);
+                p.multi_block.partial_sum   = reinterpret_cast<float*>((char*)cfg.temp_buffer
+                    + cfg.decoding_multi_block_output_size
+                    + cfg.decoding_multi_block_max_size);
+                p.multi_block.block_counter = reinterpret_cast<int32_t*>((char*)cfg.temp_buffer
+                    + cfg.decoding_multi_block_output_size
+                    + cfg.decoding_multi_block_max_size
+                    + cfg.decoding_multi_block_sum_size);
+                cudaMemsetAsync(p.multi_block.block_counter, 0, cfg.decoding_multi_block_counter_size, stream);
+                status = dynamic_batching_decoding_cache_attention<256, true>(stream, cfg, p);
+            } else if (cfg.decoding_threads_per_block == 256) {
+                status = dynamic_batching_decoding_cache_attention<256, false>(stream, cfg, p);
+            } else if (cfg.decoding_threads_per_block == 512) {
+                status = dynamic_batching_decoding_cache_attention<512, false>(stream, cfg, p);
+            } else if (cfg.decoding_threads_per_block == 1024) {
+                status = dynamic_batching_decoding_cache_attention<1024, false>(stream, cfg, p);
             }
             if (status != ppl::common::RC_SUCCESS) {
+                LOG(ERROR) << "unsupported decoding_multi_block_size and decoding_threads_per_block";
                 return ppl::common::RC_UNSUPPORTED;
             }
         } else {
@@ -1058,34 +998,34 @@ ppl::common::RetCode dynamic_batch_multi_head_cache_attention(
         }
     }
 
-    if (prefill_batches > 0) {
-        const int64_t custom_mask_type = is_causal ? 1 : 0;
-        const void* prefill_seqstart_q = ((int64_t*)seqstarts) + decoding_batches;
+    if (cfg.prefill_batches > 0) {
+        const int64_t custom_mask_type = cfg.is_causal ? 1 : 0;
+        const void* prefill_seqstart_q = ((int64_t*)cfg.seqstarts) + cfg.decoding_batches;
 
         return llm::cuda::xformer::fmha(
             stream,
-            device_prop,
-            query_shape->GetDataType(),
-            query,
-            current_key,
-            current_value,
+            *cfg.device_prop,
+            cfg.query_shape->GetDataType(),
+            cfg.query,
+            cfg.current_key,
+            cfg.current_value,
             nullptr,
             prefill_seqstart_q,
             prefill_seqstart_q,
-            prefill_batches,
-            0, q_stride_s, head_dim,
-            0, k_stride_s, head_dim,
-            0, v_stride_s, head_dim,
+            cfg.prefill_batches,
+            0, cfg.q_stride_s, cfg.head_dim,
+            0, cfg.k_stride_s, cfg.head_dim,
+            0, cfg.v_stride_s, cfg.head_dim,
             0, 0, 0,
-            o_stride_s,
-            max_seqlen,
-            max_kvlen,
-            num_heads,
-            num_kv_heads,
-            head_dim,
+            cfg.o_stride_s,
+            cfg.max_seqlen,
+            cfg.max_kvlen,
+            cfg.num_heads,
+            cfg.num_kv_heads,
+            cfg.head_dim,
             custom_mask_type,
-            attn_scale,
-            output
+            cfg.attn_scale,
+            cfg.output
         );
     } else {
         return ppl::common::RC_SUCCESS;
