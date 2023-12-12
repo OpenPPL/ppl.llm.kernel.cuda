@@ -721,9 +721,23 @@ dynamic_batch_multi_head_cache_attention_prepare(
     constexpr int64_t TPB = 256;
     constexpr int64_t VPT = 8;
 
+    bool not_enough_shm = false;
+    if(decoding_batches > 0) {
+        constexpr int64_t WARP_SIZE = 32;
+        const int64_t WPT = TPB / WARP_SIZE;
+        const int64_t reduce_shm_size = TPB / WARP_SIZE * sizeof(float);
+        const int64_t logits_size = max(max_kvlen * sizeof(float), WPT * head_dim * sizeof(float));
+        const int64_t shm_size = reduce_shm_size + logits_size;
+        not_enough_shm = shm_size > (int64_t)device_prop.sharedMemPerBlockOptin;
+    }
+
     // get multi block size
     int64_t decoding_multi_block_size = 1;
-    if (decoding_batches > 0 && decoding_attention_total_blocks < multi_processor_count && max_kvlen >= 1024) {
+    if (decoding_batches > 0 &&
+        (not_enough_shm
+         || (decoding_attention_total_blocks < multi_processor_count && max_kvlen >= 1024)
+        )
+    ) {
         while (decoding_multi_block_size < TPB / (head_dim / VPT)) {
             decoding_multi_block_size <<= 1;
         }
@@ -759,11 +773,9 @@ dynamic_batch_multi_head_cache_attention_prepare(
         decoding_threads_per_block = std::min<int64_t>(TPB * block_size_factor, 1024);
         if (decoding_threads_per_block <= 256) {
             decoding_threads_per_block = 256;
-        }
-        else if (decoding_threads_per_block <= 512) {
+        } else if (decoding_threads_per_block <= 512) {
             decoding_threads_per_block = 512;
-        }
-        else {
+        } else {
             decoding_threads_per_block = 1024;
         }
     }
