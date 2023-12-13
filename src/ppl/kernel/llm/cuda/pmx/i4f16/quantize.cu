@@ -28,16 +28,16 @@ template<int32_t group_size, int32_t TPB>
 __global__
 void minmax_scale_fp16_kernel(
     const fp16_t* input, // [N, K]
-    const int32_t N,
-    const int32_t K,
+    const int64_t N,
+    const int64_t K,
     fp16_t* scale_ptr // [N, K / 128]
 ) {
     // Firstly we take element from x in row major order for int4 quant
     // One Warp process one group:
     const int32_t tid = threadIdx.x;
 
-    const int32_t k_block_id = blockIdx.x;
-    const int32_t n_block_id = blockIdx.y;
+    const int32_t n_block_id = blockIdx.x;
+    const int32_t k_block_id = blockIdx.y;
 
     constexpr int32_t INT4_PACK_SIZE = 8;
 
@@ -48,7 +48,7 @@ void minmax_scale_fp16_kernel(
         local_x[i] = 0.0;
     }
     for (int32_t i = 0; i < INT4_PACK_SIZE; i++) {
-        int32_t index = k_block_id * group_size + i + tid * INT4_PACK_SIZE;
+        int64_t index = (int64_t)k_block_id * group_size + i + tid * INT4_PACK_SIZE;
         if(index < K) {
             local_x[i] = __half2float(input[index + n_block_id * K]);
             if(abs(local_x[i]) > local_max) {
@@ -72,8 +72,8 @@ __global__
 void minmax_quantize_fp16_kernel(
     const fp16_t* input, // [N, K]
     const fp16_t* scale_ptr, // [N, K / 128]
-    const int32_t N,
-    const int32_t K,
+    const int64_t N,
+    const int64_t K,
     int32_t *output // [N / 8, K]
 ) {
     constexpr int32_t INT4_PACK_SIZE = 8;
@@ -84,8 +84,8 @@ void minmax_quantize_fp16_kernel(
     if (tid * INT4_PACK_SIZE < N * K){
         # pragma unroll
         for(int32_t i = 0; i < INT4_PACK_SIZE; i++){
-            const int32_t index_in_row_major = tid * INT4_PACK_SIZE + i;
-            const int32_t index_in_col_major = (index_in_row_major % N) * K + index_in_row_major / N;
+            const int64_t index_in_row_major = tid * INT4_PACK_SIZE + i;
+            const int64_t index_in_col_major = (index_in_row_major % N) * K + index_in_row_major / N;
             local_x[i] = input[index_in_col_major];
             local_s[i] = scale_ptr[index_in_row_major % N + (index_in_row_major / N / 128) * N];
         }
@@ -103,9 +103,10 @@ void minmax_quantize_fp16_kernel(
 
     // output is stored as col major, transpose it in 16-bit order(not 32-bit).
     // output matrix [N, K] in 16 bit will behave like [2 * N, K]
-    const int32_t pack_offset = (tid * INT4_PACK_SIZE) >> 2;
-    const int32_t KK = K; const int32_t NN = N / 8 * 2;
-    int32_t pack_offset_in_col_major[2] = {
+    const int64_t pack_offset = (tid * INT4_PACK_SIZE) >> 2;
+    const int64_t KK = K;
+    const int64_t NN = N / 8 * 2;
+    int64_t pack_offset_in_col_major[2] = {
         (pack_offset % NN) * KK + pack_offset / NN,
         ((pack_offset + 1) % NN) * KK + (pack_offset + 1) / NN
     };
@@ -131,11 +132,11 @@ ppl::common::RetCode minmax_quantize_fp16(
     constexpr int32_t TPB = 256;
 
     const dim3 scale_block = {
-        (unsigned int)((K + group_size - 1) / group_size),
         (unsigned int)N,
+        (unsigned int)((K + group_size - 1) / group_size),
         1};
     const int32_t quantize_block = (N * K / INT4_PACK_SIZE + TPB - 1) / TPB;
-    
+
     switch(group_size){
         case 128:
             minmax_scale_fp16_kernel<128, 128 / INT4_PACK_SIZE>
