@@ -68,6 +68,9 @@ struct dynamic_batch_multi_head_cache_attention_config {
     int64_t v_stride_s;
     int64_t o_stride_s;
 
+    int64_t mask_stride_s;
+    int64_t mask_stride_h;
+
     float attn_scale;
     int64_t kv_head_shift;       // !!! Use this if (num_heads/num_kv_heads) is power of 2  or zero, otherwise set SHIFT_KV to false.
     int64_t num_kv_repeats;       // And then we will use this one to compute kv_head_idx, but the performance will lost 10%
