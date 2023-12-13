@@ -1,9 +1,12 @@
 #include "ppl/kernel/llm/cuda/pmx/layer_norm.h"
-#include "type.h"
+#include "cudakernel/common/common.cuh"
 #include "ppl/common/log.h"
 
 #include <cuda_fp16.h>
-#include "cudakernel/common/common.cuh"
+
+__device__ static inline float2 operator+(const float2& a, const float2& b) {
+    return {a.x + b.x, a.y + b.y};
+}
 
 namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pmx {
 
@@ -16,7 +19,8 @@ void layer_norm_kernel_fp16(
     const float eps,
     const int64_t normalize_shape,
     half *output
-){
+)
+{
     const int64_t idx = normalize_shape * blockIdx.x + threadIdx.x * VPT;
     half inLocal[VPT]; half weightLocal[VPT]; half biasLocal[VPT];
 
@@ -26,8 +30,7 @@ void layer_norm_kernel_fp16(
     float value = 0.0f;
 
 #pragma unroll
-    for (int32_t it = 0; it < VPT; it++)
-    {
+    for (int32_t it = 0; it < VPT; it++) {
         value = __half2float(inLocal[it]);
         loc.x += value * r_normalize_shape;
         loc.y += value * value * r_normalize_shape;
@@ -70,7 +73,8 @@ void layer_norm_kernel_fp16_default(
     const float eps,
     const int64_t normalize_shape,
     half *output
-) {
+)
+{
     const half* cur_in = x + normalize_shape * blockIdx.x;
     half* cur_out = output + normalize_shape * blockIdx.x;
     
@@ -78,7 +82,7 @@ void layer_norm_kernel_fp16_default(
     float r_normalize_shape = 1.0f / (normalize_shape);
     float value = 0.0f;
 
-    for(int idx = threadIdx.x; idx < normalize_shape; idx += TPB) {
+    for (int idx = threadIdx.x; idx < normalize_shape; idx += TPB) {
         value = __half2float(cur_in[idx]);
         loc.x += value * r_normalize_shape;
         loc.y += value * value * r_normalize_shape;
@@ -96,7 +100,7 @@ void layer_norm_kernel_fp16_default(
 
     __syncthreads();
 
-    for(int idx=threadIdx.x; idx < normalize_shape; idx += TPB) {
+    for (int idx=threadIdx.x; idx < normalize_shape; idx += TPB) {
         if (HAS_AFFINE) {
             cur_out[idx] = __float2half((__half2float(cur_in[idx]) - mu) * rsigma * __half2float(weight[idx]) + __half2float(bias[idx]));
         } else {
@@ -116,7 +120,8 @@ void skip_layer_norm_kernel_fp16(
     const int64_t normalize_shape,
     half *output,
     half *skip_out
-){
+)
+{
     const int64_t idx = normalize_shape * blockIdx.x + threadIdx.x * VPT;
     half inLocal[VPT]; half weightLocal[VPT]; half biasLocal[VPT];
 
@@ -141,8 +146,7 @@ void skip_layer_norm_kernel_fp16(
     float value = 0.0f;
 
 #pragma unroll
-    for (int32_t it = 0; it < VPT; it++)
-    {
+    for (int32_t it = 0; it < VPT; it++) {
         value = __half2float(inLocal[it]);
         loc.x += value * r_normalize_shape;
         loc.y += value * value * r_normalize_shape;
@@ -152,8 +156,7 @@ void skip_layer_norm_kernel_fp16(
 
     __shared__ float mu;     // mean
     __shared__ float rsigma; // std.dev.
-    if (threadIdx.x == 0)
-    {
+    if (threadIdx.x == 0) {
         mu = reduced.x;
         rsigma = rsqrt(reduced.y - mu * mu + eps);
     }
@@ -165,8 +168,7 @@ void skip_layer_norm_kernel_fp16(
         copy<sizeof(half) * VPT>(&weight[threadIdx.x * VPT], weightLocal);
     }
 #pragma unroll
-    for (int32_t it = 0; it < VPT; it++)
-    {
+    for (int32_t it = 0; it < VPT; it++) {
         if (HAS_AFFINE) {
             outLocal[it] = __float2half((__half2float(inLocal[it]) - mu) * rsigma * __half2float(weightLocal[it]) + __half2float(biasLocal[it]));
         } else {
@@ -189,14 +191,15 @@ void skip_layer_norm_kernel_fp16_default(
     const int64_t normalize_shape,
     half *output,
     half *skip_out
-) {
+)
+{
     const half* cur_in = x + normalize_shape * blockIdx.x;
     const half* cur_skip_in = skip_in + normalize_shape * blockIdx.x;
     half* cur_out = output + normalize_shape * blockIdx.x;
     half* cur_skip_out = skip_out + normalize_shape * blockIdx.x;
 
     // step 1: compute x + skip_in
-    for (int idx=threadIdx.x; idx < normalize_shape; idx += TPB) {
+    for (int idx = threadIdx.x; idx < normalize_shape; idx += TPB) {
         if (HAS_SKIP_IN) {
             cur_skip_out[idx] = cur_in[idx] + cur_skip_in[idx];
         } else {
@@ -209,7 +212,7 @@ void skip_layer_norm_kernel_fp16_default(
     float r_normalize_shape = 1.0f / (normalize_shape);
     float value = 0.0f;
 
-    for(int idx = threadIdx.x; idx < normalize_shape; idx += TPB) {
+    for (int idx = threadIdx.x; idx < normalize_shape; idx += TPB) {
         value = __half2float(cur_skip_out[idx]);
         loc.x += value * r_normalize_shape;
         loc.y += value * value * r_normalize_shape;
@@ -227,7 +230,7 @@ void skip_layer_norm_kernel_fp16_default(
 
     __syncthreads();
 
-    for(int idx=threadIdx.x; idx < normalize_shape; idx += TPB) {
+    for (int idx = threadIdx.x; idx < normalize_shape; idx += TPB) {
         if (HAS_AFFINE) {
             cur_out[idx] = __float2half((__half2float(cur_skip_out[idx]) - mu) * rsigma * __half2float(weight[idx]) + __half2float(bias[idx]));
         } else {
@@ -236,41 +239,41 @@ void skip_layer_norm_kernel_fp16_default(
     }
 }
 
-
-
 ppl::common::RetCode layer_norm(
     cudaStream_t stream,
-    ppl::common::TensorShape* input_shape,
+    const ppl::common::TensorShape* input_shape,
     const void* input,
-    const void* scale,
-    const void* shift,
+    const void* weight,
+    const void* bias,
     const void* skip_in,
+    const int32_t axis,
+    const bool elementwise_affine,
+    const float eps, 
+    const bool skip_term,
     void* output,
-    void* skip_out,
-    int64_t normalize_shape,
-    bool has_affine,
-    float eps, 
-    bool skip_term) {
+    void* skip_out)
+{
 
     if(input_shape->GetDataType() != ppl::common::DATATYPE_FLOAT16) {
       LOG(ERROR) << "LayerNorm only support fp16, but got ["<< input_shape->GetDataType() << "]";
     }
     constexpr int32_t VPT = 16 / sizeof(half);
 
-    const int64_t norm_size = normalize_shape;
-    const int64_t grid_size = input_shape->CalcElementsIncludingPadding() / normalize_shape;
+    const int32_t real_axis = axis < 0 ? input_shape->GetDimCount() + axis : axis;
+    const int64_t normalize_shape = input_shape->CalcElementsFromDimensionExcludingPadding(real_axis);
+    const int64_t grid_size = input_shape->CalcElementsToDimensionExcludingPadding(real_axis);
 
     if (skip_term) {
-        if (has_affine) {
+        if (elementwise_affine) {
             if (skip_in) {
-                switch (norm_size)
+                switch (normalize_shape)
                 {
                 case 768:
                     skip_layer_norm_kernel_fp16<VPT, 768 / VPT, true, true>
                     <<<grid_size, 768 / VPT, 0, stream>>>(
                         (const half*)input,
-                        (const half*)scale,
-                        (const half*)shift,
+                        (const half*)weight,
+                        (const half*)bias,
                         (const half*)skip_in,
                         eps, 
                         normalize_shape, 
@@ -281,8 +284,8 @@ ppl::common::RetCode layer_norm(
                     skip_layer_norm_kernel_fp16<VPT, 1024 / VPT, true, true>
                     <<<grid_size, 1024 / VPT, 0, stream>>>(
                         (const half*)input,
-                        (const half*)scale,
-                        (const half*)shift,
+                        (const half*)weight,
+                        (const half*)bias,
                         (const half*)skip_in,
                         eps, 
                         normalize_shape, 
@@ -293,8 +296,8 @@ ppl::common::RetCode layer_norm(
                     skip_layer_norm_kernel_fp16<VPT, 2048 / VPT, true, true>
                     <<<grid_size, 2048 / VPT, 0, stream>>>(
                         (const half*)input,
-                        (const half*)scale,
-                        (const half*)shift,
+                        (const half*)weight,
+                        (const half*)bias,
                         (const half*)skip_in,
                         eps, 
                         normalize_shape, 
@@ -305,8 +308,8 @@ ppl::common::RetCode layer_norm(
                     skip_layer_norm_kernel_fp16<VPT, 4096 / VPT, true, true>
                     <<<grid_size, 4096 / VPT, 0, stream>>>(
                         (const half*)input,
-                        (const half*)scale,
-                        (const half*)shift,
+                        (const half*)weight,
+                        (const half*)bias,
                         (const half*)skip_in,
                         eps, 
                         normalize_shape, 
@@ -317,8 +320,8 @@ ppl::common::RetCode layer_norm(
                     skip_layer_norm_kernel_fp16_default<512, true, true>
                     <<<grid_size, 512, 0, stream>>>(
                         (const half*)input,
-                        (const half*)scale,
-                        (const half*)shift,
+                        (const half*)weight,
+                        (const half*)bias,
                         (const half*)skip_in,
                         eps,
                         normalize_shape,
@@ -326,14 +329,14 @@ ppl::common::RetCode layer_norm(
                         (half*)skip_out);
                 }
             } else {
-                switch (norm_size)
+                switch (normalize_shape)
                 {
                 case 768:
                     skip_layer_norm_kernel_fp16<VPT, 768 / VPT, true, false>
                     <<<grid_size, 768 / VPT, 0, stream>>>(
                         (const half*)input,
-                        (const half*)scale,
-                        (const half*)shift,
+                        (const half*)weight,
+                        (const half*)bias,
                         (const half*)skip_in,
                         eps, 
                         normalize_shape, 
@@ -344,8 +347,8 @@ ppl::common::RetCode layer_norm(
                     skip_layer_norm_kernel_fp16<VPT, 1024 / VPT, true, false>
                     <<<grid_size, 1024 / VPT, 0, stream>>>(
                         (const half*)input,
-                        (const half*)scale,
-                        (const half*)shift,
+                        (const half*)weight,
+                        (const half*)bias,
                         (const half*)skip_in,
                         eps, 
                         normalize_shape, 
@@ -356,8 +359,8 @@ ppl::common::RetCode layer_norm(
                     skip_layer_norm_kernel_fp16<VPT, 2048 / VPT, true, false>
                     <<<grid_size, 2048 / VPT, 0, stream>>>(
                         (const half*)input,
-                        (const half*)scale,
-                        (const half*)shift,
+                        (const half*)weight,
+                        (const half*)bias,
                         (const half*)skip_in,
                         eps, 
                         normalize_shape, 
@@ -368,8 +371,8 @@ ppl::common::RetCode layer_norm(
                     skip_layer_norm_kernel_fp16<VPT, 4096 / VPT, true, false>
                     <<<grid_size, 4096 / VPT, 0, stream>>>(
                         (const half*)input,
-                        (const half*)scale,
-                        (const half*)shift,
+                        (const half*)weight,
+                        (const half*)bias,
                         (const half*)skip_in,
                         eps, 
                         normalize_shape, 
@@ -380,8 +383,8 @@ ppl::common::RetCode layer_norm(
                     skip_layer_norm_kernel_fp16_default<512, true, false>
                     <<<grid_size, 512, 0, stream>>>(
                         (const half*)input,
-                        (const half*)scale,
-                        (const half*)shift,
+                        (const half*)weight,
+                        (const half*)bias,
                         (const half*)skip_in,
                         eps,
                         normalize_shape,
@@ -391,14 +394,14 @@ ppl::common::RetCode layer_norm(
             }
         } else {
             if (skip_in) {
-                switch (norm_size)
+                switch (normalize_shape)
                 {
                 case 768:
                     skip_layer_norm_kernel_fp16<VPT, 768 / VPT, false, true>
                     <<<grid_size, 768 / VPT, 0, stream>>>(
                         (const half*)input,
-                        (const half*)scale,
-                        (const half*)shift,
+                        (const half*)weight,
+                        (const half*)bias,
                         (const half*)skip_in,
                         eps, 
                         normalize_shape, 
@@ -409,8 +412,8 @@ ppl::common::RetCode layer_norm(
                     skip_layer_norm_kernel_fp16<VPT, 1024 / VPT, false, true>
                     <<<grid_size, 1024 / VPT, 0, stream>>>(
                         (const half*)input,
-                        (const half*)scale,
-                        (const half*)shift,
+                        (const half*)weight,
+                        (const half*)bias,
                         (const half*)skip_in,
                         eps, 
                         normalize_shape, 
@@ -421,8 +424,8 @@ ppl::common::RetCode layer_norm(
                     skip_layer_norm_kernel_fp16<VPT, 2048 / VPT, false, true>
                     <<<grid_size, 2048 / VPT, 0, stream>>>(
                         (const half*)input,
-                        (const half*)scale,
-                        (const half*)shift,
+                        (const half*)weight,
+                        (const half*)bias,
                         (const half*)skip_in,
                         eps, 
                         normalize_shape, 
@@ -433,8 +436,8 @@ ppl::common::RetCode layer_norm(
                     skip_layer_norm_kernel_fp16<VPT, 4096 / VPT, false, true>
                     <<<grid_size, 4096 / VPT, 0, stream>>>(
                         (const half*)input,
-                        (const half*)scale,
-                        (const half*)shift,
+                        (const half*)weight,
+                        (const half*)bias,
                         (const half*)skip_in,
                         eps, 
                         normalize_shape, 
@@ -445,8 +448,8 @@ ppl::common::RetCode layer_norm(
                     skip_layer_norm_kernel_fp16_default<512, false, true>
                     <<<grid_size, 512, 0, stream>>>(
                         (const half*)input,
-                        (const half*)scale,
-                        (const half*)shift,
+                        (const half*)weight,
+                        (const half*)bias,
                         (const half*)skip_in,
                         eps,
                         normalize_shape,
@@ -454,14 +457,14 @@ ppl::common::RetCode layer_norm(
                         (half*)skip_out);
                 }
             } else {
-                switch (norm_size)
+                switch (normalize_shape)
                 {
                 case 768:
                     skip_layer_norm_kernel_fp16<VPT, 768 / VPT, false, false>
                     <<<grid_size, 768 / VPT, 0, stream>>>(
                         (const half*)input,
-                        (const half*)scale,
-                        (const half*)shift,
+                        (const half*)weight,
+                        (const half*)bias,
                         (const half*)skip_in,
                         eps, 
                         normalize_shape, 
@@ -472,8 +475,8 @@ ppl::common::RetCode layer_norm(
                     skip_layer_norm_kernel_fp16<VPT, 1024 / VPT, false, false>
                     <<<grid_size, 1024 / VPT, 0, stream>>>(
                         (const half*)input,
-                        (const half*)scale,
-                        (const half*)shift,
+                        (const half*)weight,
+                        (const half*)bias,
                         (const half*)skip_in,
                         eps, 
                         normalize_shape, 
@@ -484,8 +487,8 @@ ppl::common::RetCode layer_norm(
                     skip_layer_norm_kernel_fp16<VPT, 2048 / VPT, false, false>
                     <<<grid_size, 2048 / VPT, 0, stream>>>(
                         (const half*)input,
-                        (const half*)scale,
-                        (const half*)shift,
+                        (const half*)weight,
+                        (const half*)bias,
                         (const half*)skip_in,
                         eps, 
                         normalize_shape, 
@@ -496,8 +499,8 @@ ppl::common::RetCode layer_norm(
                     skip_layer_norm_kernel_fp16<VPT, 4096 / VPT, false, false>
                     <<<grid_size, 4096 / VPT, 0, stream>>>(
                         (const half*)input,
-                        (const half*)scale,
-                        (const half*)shift,
+                        (const half*)weight,
+                        (const half*)bias,
                         (const half*)skip_in,
                         eps, 
                         normalize_shape, 
@@ -508,8 +511,8 @@ ppl::common::RetCode layer_norm(
                     skip_layer_norm_kernel_fp16_default<512, false, false>
                     <<<grid_size, 512, 0, stream>>>(
                         (const half*)input,
-                        (const half*)scale,
-                        (const half*)shift,
+                        (const half*)weight,
+                        (const half*)bias,
                         (const half*)skip_in,
                         eps,
                         normalize_shape,
@@ -520,15 +523,15 @@ ppl::common::RetCode layer_norm(
         }
 
     } else {
-        if (has_affine) {        
-            switch (norm_size)
+        if (elementwise_affine) {        
+            switch (normalize_shape)
             {
             case 768:
                 layer_norm_kernel_fp16<VPT, 768 / VPT, true>
                 <<<grid_size, 768 / VPT, 0, stream>>>(
                     (const half*)input,
-                    (const half*)scale,
-                    (const half*)shift,
+                    (const half*)weight,
+                    (const half*)bias,
                     eps, 
                     normalize_shape, 
                     (half*)output);
@@ -537,8 +540,8 @@ ppl::common::RetCode layer_norm(
                 layer_norm_kernel_fp16<VPT, 1024 / VPT, true>
                 <<<grid_size, 1024 / VPT, 0, stream>>>(
                     (const half*)input,
-                    (const half*)scale,
-                    (const half*)shift,
+                    (const half*)weight,
+                    (const half*)bias,
                     eps, 
                     normalize_shape, 
                     (half*)output);
@@ -547,8 +550,8 @@ ppl::common::RetCode layer_norm(
                 layer_norm_kernel_fp16<VPT, 2048 / VPT, true>
                 <<<grid_size, 2048 / VPT, 0, stream>>>(
                     (const half*)input,
-                    (const half*)scale,
-                    (const half*)shift,
+                    (const half*)weight,
+                    (const half*)bias,
                     eps, 
                     normalize_shape, 
                     (half*)output);
@@ -557,8 +560,8 @@ ppl::common::RetCode layer_norm(
                 layer_norm_kernel_fp16<VPT, 4096 / VPT, true>
                 <<<grid_size, 4096 / VPT, 0, stream>>>(
                     (const half*)input,
-                    (const half*)scale,
-                    (const half*)shift,
+                    (const half*)weight,
+                    (const half*)bias,
                     eps, 
                     normalize_shape, 
                     (half*)output);
@@ -567,21 +570,21 @@ ppl::common::RetCode layer_norm(
                 layer_norm_kernel_fp16_default<512, true>
                 <<<grid_size, 512, 0, stream>>> (
                     (const half*)input,
-                    (const half*)scale,
-                    (const half*)shift,
+                    (const half*)weight,
+                    (const half*)bias,
                     eps, 
                     normalize_shape, 
                     (half*)output);
             }
         } else {
-            switch (norm_size)
+            switch (normalize_shape)
             {
             case 768:
                 layer_norm_kernel_fp16<VPT, 768 / VPT, false>
                 <<<grid_size, 768 / VPT, 0, stream>>>(
                     (const half*)input,
-                    (const half*)scale,
-                    (const half*)shift,
+                    (const half*)weight,
+                    (const half*)bias,
                     eps, 
                     normalize_shape, 
                     (half*)output);
@@ -590,8 +593,8 @@ ppl::common::RetCode layer_norm(
                 layer_norm_kernel_fp16<VPT, 1024 / VPT, false>
                 <<<grid_size, 1024 / VPT, 0, stream>>>(
                     (const half*)input,
-                    (const half*)scale,
-                    (const half*)shift,
+                    (const half*)weight,
+                    (const half*)bias,
                     eps, 
                     normalize_shape, 
                     (half*)output);
@@ -600,8 +603,8 @@ ppl::common::RetCode layer_norm(
                 layer_norm_kernel_fp16<VPT, 2048 / VPT, false>
                 <<<grid_size, 2048 / VPT, 0, stream>>>(
                     (const half*)input,
-                    (const half*)scale,
-                    (const half*)shift,
+                    (const half*)weight,
+                    (const half*)bias,
                     eps, 
                     normalize_shape, 
                     (half*)output);
@@ -610,8 +613,8 @@ ppl::common::RetCode layer_norm(
                 layer_norm_kernel_fp16<VPT, 4096 / VPT, false>
                 <<<grid_size, 4096 / VPT, 0, stream>>>(
                     (const half*)input,
-                    (const half*)scale,
-                    (const half*)shift,
+                    (const half*)weight,
+                    (const half*)bias,
                     eps, 
                     normalize_shape, 
                     (half*)output);
@@ -620,8 +623,8 @@ ppl::common::RetCode layer_norm(
                 layer_norm_kernel_fp16_default<512, false>
                 <<<grid_size, 512, 0, stream>>> (
                     (const half*)input,
-                    (const half*)scale,
-                    (const half*)shift,
+                    (const half*)weight,
+                    (const half*)bias,
                     eps, 
                     normalize_shape, 
                     (half*)output);

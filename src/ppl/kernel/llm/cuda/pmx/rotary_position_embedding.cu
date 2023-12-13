@@ -30,20 +30,20 @@ namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pm
  * @param dim_idx: Represents the position (offset) of the current element in the hidden_dimension.
  * @param pos_idx: Represents the position (offset) of the current element in the sequence position.
 
- * @param head_dim: Total size of hidden_dimension.
+ * @param rotary_dim: Total size of hidden_dimension.
  * @param theta parameter used to compute freq.
  */
 inline __device__
 float2 rotary_position_embedding_coeff(
     const int64_t dim_idx, 
     const int64_t pos_idx,
-    const int64_t head_dim,
+    const int64_t rotary_dim,
     const float theta)
 {
     // fp16 does not have __sincosf instruction.
     // So we have only fp32 implementation of Rotary Embedding.
     float2 ret = {0.0f, 0.0f};
-    const float freq = 1.0f / __powf(theta, (dim_idx / (float)head_dim)) * pos_idx;
+    const float freq = 1.0f / __powf(theta, (dim_idx / (float)rotary_dim)) * pos_idx;
     __sincosf(freq, &ret.y, &ret.x);
     return ret;
 }
@@ -97,7 +97,7 @@ void rotary_position_embedding_kernel(
             const float2 q = __half22float2(query[q_idx]);
 
             const float2 b = rotary_position_embedding_coeff(
-                dim_idx, pos_idx, head_dim, theta);
+                dim_idx, pos_idx, rotary_dim, theta);
 
             rotated_query[rq_idx] = {
                 __float2half(q.x * b.x - q.y * b.y),
@@ -250,7 +250,7 @@ void dynamic_batching_rotary_position_embedding_kernel(
                 const float2 q = __half22float2(q_ptr[tid]);
 
                 const float2 b = rotary_position_embedding_coeff(
-                    dim_idx, pos_idx, p.head_dim, p.theta);
+                    dim_idx, pos_idx, p.rotary_dim, p.theta);
 
                 rq_ptr[tid] = {
                     __float2half(q.x * b.x - q.y * b.y),

@@ -61,13 +61,13 @@ ppl::common::RetCode rotary_2d_position_embedding(
     const ppl::common::TensorShape* key_shape,
     const void* key,  // (batch, seqlen, ..., head_dim), dim[2] is the leading dim of heads
     const void* cu_start_pos,
+    const void* first_seqlen,
+    const void* pad_len,
     const int64_t start_pos,
     const float theta,
     const int32_t bypass_key,
     const int64_t num_heads,
     const int64_t num_key_heads,
-    const void* first_seqlen,
-    const void* pad_len,
     const ppl::common::TensorShape* rotated_query_shape,
     void* rotated_query, // (batch, seqlen, ..., head_dim), dim[2] is the leading dim of heads
     const ppl::common::TensorShape* rotated_key_shape,

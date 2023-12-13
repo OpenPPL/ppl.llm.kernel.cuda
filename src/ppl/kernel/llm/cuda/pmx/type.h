@@ -24,9 +24,6 @@
 #include <cuda_fp16.h>
 #include <math.h>
 
-__device__ inline float2 operator+(const float2& a, const float2& b) {
-    return {a.x + b.x, a.y + b.y};
-}
 namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pmx {
 
 using fp16_t   = half;
