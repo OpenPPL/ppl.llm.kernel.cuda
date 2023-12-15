@@ -225,9 +225,9 @@ __global__
 void dynamic_batching_rotary_position_embedding_kernel(
     dynamic_batching_rotary_position_embedding_kernel_param p)
 {
-    if (blockIdx.y < p.seqstarts[blockIdx.x + 1] - p.seqstarts[blockIdx.x]) {
-        const int64_t batch_idx = blockIdx.x;
-        const int64_t seq_idx = blockIdx.y;
+    if (blockIdx.x < p.seqstarts[blockIdx.y + 1] - p.seqstarts[blockIdx.y]) {
+        const int64_t batch_idx = blockIdx.y;
+        const int64_t seq_idx = blockIdx.x;
         const int64_t tid = blockIdx.z * TPB + threadIdx.x;
 
         if (tid < p.num_heads * p.head_dim) {
@@ -345,7 +345,7 @@ ppl::common::RetCode dynamic_batching_rotary_position_embedding(
     };
 
     const int32_t TPB = 256;
-    const dim3 grid(batch, max_seqlen, (num_heads * head_dim / 2 + TPB - 1) / TPB);
+    const dim3 grid(max_seqlen, batch, (num_heads * head_dim / 2 + TPB - 1) / TPB);
     if (bypass_key) {
         dynamic_batching_rotary_position_embedding_kernel<TPB, true><<<grid, TPB, 0, stream>>>(p);
     } else {

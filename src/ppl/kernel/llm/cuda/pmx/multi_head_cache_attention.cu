@@ -79,10 +79,10 @@ template<int32_t VPT, int32_t TPB> // 8 fp16 occupy 128 bytes, which can be load
 __global__
 void dynamic_batching_kv_cache_quantize_kernel(dynamic_batching_kv_cache_quantize_kernel_param p)
 {
-    if (blockIdx.y < p.seqstarts[blockIdx.x + 1] - p.seqstarts[blockIdx.x]) {
+    if (blockIdx.x < p.seqstarts[blockIdx.y + 1] - p.seqstarts[blockIdx.y]) {
         const int64_t thr_per_head = p.head_dim / VPT;
-        const int64_t batch_id = blockIdx.x;
-        const int64_t seq_idx = blockIdx.y;
+        const int64_t batch_id = blockIdx.y;
+        const int64_t seq_idx = blockIdx.x;
         const int64_t tid = blockIdx.z * TPB + threadIdx.x;
 
         if (tid < p.num_kv_heads * p.head_dim / VPT) {
@@ -987,7 +987,7 @@ ppl::common::RetCode dynamic_batch_multi_head_cache_attention(
             return ppl::common::RC_UNSUPPORTED;
         }
 
-        dim3 grid(cfg.batch, cfg.max_seqlen, (cfg.num_kv_heads * cfg.head_dim / VPT + TPB - 1) / TPB);
+        dim3 grid(cfg.max_seqlen, cfg.batch, (cfg.num_kv_heads * cfg.head_dim / VPT + TPB - 1) / TPB);
         dynamic_batching_kv_cache_quantize_kernel<VPT, TPB><<<grid, TPB, 0, stream>>>(
             {(half*)cfg.current_key,
             (half*)cfg.current_value,
