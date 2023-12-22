@@ -20,9 +20,6 @@
 
 #include "autogen/cutlassF.h"
 
-#include <cuda_fp16.h>
-#include <cmath>
-
 namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace xformer {
 
 struct FmhaKernelHelper {
@@ -196,11 +193,6 @@ ppl::common::RetCode fmha(
     const float attn_scale,
     void* output)
 {
-    if (datatype != ppl::common::DATATYPE_FLOAT16) {
-        LOG(ERROR) << "only support fp16";
-        return ppl::common::RC_UNSUPPORTED;
-    }
-
     bool kernel_launched = false;
     const char *kernel_miss_reason = nullptr;
 
@@ -245,7 +237,14 @@ ppl::common::RetCode fmha(
         kernel_miss_reason,
     };
 
-    dispatch_cutlassF<::cutlass::half_t>(hlp, compute_capability);
+    if (datatype == ppl::common::DATATYPE_FLOAT16) {
+        dispatch_cutlassF<::cutlass::half_t>(hlp, compute_capability);
+    } else if (datatype == ppl::common::DATATYPE_BFLOAT16) {
+        dispatch_cutlassF<::cutlass::bfloat16_t>(hlp, compute_capability);
+    } else {
+        LOG(ERROR) << "only support fp16 & bf16";
+        return ppl::common::RC_UNSUPPORTED;
+    }
 
     if (!kernel_launched) {
         LOG(ERROR) << "xformer kernel not launched, reason: " << kernel_miss_reason;

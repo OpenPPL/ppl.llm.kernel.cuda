@@ -18,57 +18,95 @@
 #include "ppl/kernel/llm/cuda/pmx/silu.h"
 #include "ppl/common/log.h"
 
-#include <cuda_fp16.h>
+#include "type.h"
 
 namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pmx {
 
-template<bool GATED>
-__global__ void silu_kernel_fp16(
-    const half *input,
-    const half *gate,
+template<typename T, bool GATED>
+__global__ void silu_kernel(
+    const T *input,
+    const T *gate,
     const int64_t num_elem,
-    half *output)
+    T *output)
 {
     const int64_t index = blockIdx.x * blockDim.x + threadIdx.x;
 
     if(index >= num_elem)
         return;
 
-    auto val = __half2float(input[index]);
+    auto val = tofp32<T>(input[index]);
     if (GATED) {
         auto gate_val = gate[index];
-        output[index] = __float2half(val / (1.f + __expf(-val))) * gate_val;
+        output[index] = fromfp32<T>(val / (1.f + __expf(-val))) * gate_val;
     } else {
-        output[index] = __float2half(val / (1.f + __expf(-val)));
+        output[index] = fromfp32<T>(val / (1.f + __expf(-val)));
     }
 }
 
 
-template<bool GATED>
-__global__ void silu_kernel_packed_fp16(
-    const half2 *input,
-    const half2 *gate,
+template<typename Tx2, bool GATED>
+__global__ void silu_kernel_packed(
+    const Tx2 *input,
+    const Tx2 *gate,
     const int64_t num_elem,
-    half2 *output)
+    Tx2 *output)
 {
     const int64_t index = blockIdx.x * blockDim.x + threadIdx.x;
 
     if(index >= num_elem)
         return;
 
-    auto val = __half22float2(input[index]);
+    using T = typename FromType2<Tx2>::type;
+
+    auto val = tofp32x2<Tx2>(input[index]);
     if (GATED) {
         auto gate_val = gate[index];
         output[index] = {
-            __float2half(val.x / (1.f + __expf(-val.x))) * gate_val.x,
-            __float2half(val.y / (1.f + __expf(-val.y))) * gate_val.y,
+            fromfp32<T>(val.x / (1.f + __expf(-val.x))) * gate_val.x,
+            fromfp32<T>(val.y / (1.f + __expf(-val.y))) * gate_val.y,
         };
     } else {
         output[index] = {
-            __float2half(val.x / (1.f + __expf(-val.x))),
-            __float2half(val.y / (1.f + __expf(-val.y)))
+            fromfp32<T>(val.x / (1.f + __expf(-val.x))),
+            fromfp32<T>(val.y / (1.f + __expf(-val.y)))
         };
     }
+}
+
+
+template<typename T>
+ppl::common::RetCode silu_impl(
+    cudaStream_t stream,
+    const ppl::common::TensorShape* input_shape,
+    const void* input,
+    const void* optional_gate,
+    void* output)
+{
+    const int64_t TPB = 256;
+    const int64_t num_elem = input_shape->CalcElementsIncludingPadding();
+
+    if (num_elem & 1) {
+        const int64_t BPG = (num_elem + TPB - 1) / TPB;
+        if (optional_gate) {
+            silu_kernel<T, true><<<BPG, TPB, 0, stream>>>(
+                (const T*)input, (const T*)optional_gate, num_elem, (T*)output);
+        } else {
+            silu_kernel<T, false><<<BPG, TPB, 0, stream>>>(
+                (const T*)input, (const T*)optional_gate, num_elem, (T*)output);
+        }
+    } else {
+        using Tx2 = typename ToType2<T>::type;
+        const int64_t BPG = ((num_elem >> 1) + TPB - 1) / TPB;
+        if (optional_gate) {
+            silu_kernel_packed<Tx2, true><<<BPG, TPB, 0, stream>>>(
+                (const Tx2*)input, (const Tx2*)optional_gate, num_elem >> 1, (Tx2*)output);
+        } else {
+            silu_kernel_packed<Tx2, false><<<BPG, TPB, 0, stream>>>(
+                (const Tx2*)input, (const Tx2*)optional_gate, num_elem >> 1, (Tx2*)output);
+        }
+    }
+
+    return ppl::common::RC_SUCCESS;
 }
 
 ppl::common::RetCode silu(
@@ -78,35 +116,15 @@ ppl::common::RetCode silu(
     const void* optional_gate,
     void* output)
 {
-    if (input_shape->GetDataType() != ppl::common::DATATYPE_FLOAT16) {
-        LOG(ERROR) << "currently only support fp16.";
-        return ppl::common::RC_UNSUPPORTED;
+    if (input_shape->GetDataType() == ppl::common::DATATYPE_FLOAT16) {
+        return silu_impl<fp16_t>(stream, input_shape, input, optional_gate, output);
+    }
+    if (input_shape->GetDataType() == ppl::common::DATATYPE_BFLOAT16) {
+        return silu_impl<bf16_t>(stream, input_shape, input, optional_gate, output);
     }
 
-    const int64_t TPB = 256;
-    const int64_t num_elem = input_shape->CalcElementsIncludingPadding();
-
-    if (num_elem & 1) {
-        const int64_t BPG = (num_elem + TPB - 1) / TPB;
-        if (optional_gate) {
-            silu_kernel_fp16<true><<<BPG, TPB, 0, stream>>>(
-                (const half*)input, (const half*)optional_gate, num_elem, (half*)output);
-        } else {
-            silu_kernel_fp16<false><<<BPG, TPB, 0, stream>>>(
-                (const half*)input, (const half*)optional_gate, num_elem, (half*)output);
-        }
-    } else {
-        const int64_t BPG = ((num_elem >> 1) + TPB - 1) / TPB;
-        if (optional_gate) {
-            silu_kernel_packed_fp16<true><<<BPG, TPB, 0, stream>>>(
-                (const half2*)input, (const half2*)optional_gate, num_elem >> 1, (half2*)output);
-        } else {
-            silu_kernel_packed_fp16<false><<<BPG, TPB, 0, stream>>>(
-                (const half2*)input, (const half2*)optional_gate, num_elem >> 1, (half2*)output);
-        }
-    }
-
-    return ppl::common::RC_SUCCESS;
+    LOG(ERROR) << "currently only support fp16 & bf16";
+    return ppl::common::RC_UNSUPPORTED;
 }
 
 }}}}}
