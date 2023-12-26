@@ -35,7 +35,7 @@ ppl::common::RetCode parallel_embedding(
     const float max_norm,
     const float norm_type,
     const int64_t padding_idx,
-    ppl::common::NcclParam* nccl_param,
+    const ppl::common::NcclParam* nccl_param,
     void* gather_buffer,
     const ppl::common::TensorShape* output_shape,
     void* output);

@@ -26,7 +26,7 @@
 namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pmx {
 
 template<int VPT, int TPB>
-__global__ 
+__global__
 void embedding_kernel(
     const int64_t* indices,
     const half* weight,
@@ -40,7 +40,7 @@ void embedding_kernel(
 }
 
 template<int TPB>
-__global__ 
+__global__
 void embedding_kernel_default(
     const int64_t* indices,
     const half* weight,
@@ -66,7 +66,7 @@ ppl::common::RetCode parallel_embedding(
     const float max_norm,
     const float norm_type,
     const int64_t padding_idx,
-    ppl::common::NcclParam* nccl_param,
+    const ppl::common::NcclParam* nccl_param,
     void* gather_buffer,
     const ppl::common::TensorShape* output_shape,
     void* output)
