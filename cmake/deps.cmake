@@ -95,4 +95,4 @@ endif()
 set(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
 
 hpcc_declare_git_dep(cutlass
-    https://github.com/NVIDIA/cutlass.git main)
+    https://github.com/NVIDIA/cutlass.git v3.2.2)
