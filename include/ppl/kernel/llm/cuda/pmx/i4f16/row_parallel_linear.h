@@ -35,7 +35,7 @@ ppl::common::RetCode row_parallel_linear(
     const void* bias,
     const int64_t in_features,
     const int64_t out_features,
-    ppl::common::NcclParam* nccl_param,
+    const ppl::common::NcclParam* nccl_param,
     const bool input_is_parallel,
     void* split_buffer,
     const int64_t gemm_workspace_size,

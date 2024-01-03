@@ -36,7 +36,7 @@ ppl::common::RetCode column_parallel_linear(
     const void* bias,
     const int64_t in_features,
     const int64_t out_features,
-    ppl::common::NcclParam* nccl_param,
+    const ppl::common::NcclParam* nccl_param,
     const bool gather_output,
     void* gather_buffer,
     const int64_t gemm_workspace_size,
