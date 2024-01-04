@@ -15,19 +15,36 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef __PPL_KERNEL_LLM_CUDA_PMX_GELU_H__
-#define __PPL_KERNEL_LLM_CUDA_PMX_GELU_H__
+#ifndef __PPL_KERNEL_LLM_CUDA_PMX_MOE_COLUMN_PARALLEL_LINEAR_H__
+#define __PPL_KERNEL_LLM_CUDA_PMX_MOE_COLUMN_PARALLEL_LINEAR_H__
 
 #include "ppl/kernel/llm/cuda/common/general_include.h"
 
+#include "ppl/kernel/llm/cuda/cublas/gemm.h"
+#include "ppl/common/cuda/nccl_utils.h"
+
 namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pmx {
 
-ppl::common::RetCode gelu(
-    cudaStream_t stream,
+ppl::common::RetCode moe_column_parallel_linear(
+    const cudaStream_t stream,
+    const cublasLtHandle_t& cublaslt_handle,
+    const cublasLtMatmulAlgo_t* algo,
     const ppl::common::TensorShape* input_shape,
     const void* input,
-    const void* optional_gate,
-    const bool approximate,
+    const ppl::common::TensorShape* weight_shape,
+    const void* weight,
+    const ppl::common::TensorShape* bias_shape,
+    const void* bias,
+    const ppl::common::TensorShape* offset_shape,
+    const void* expert_offset,
+    const int64_t in_features,
+    const int64_t out_features,
+    const ppl::common::NcclParam* nccl_param,
+    const bool gather_output,
+    void* gather_buffer,
+    const int64_t cublas_workspace_size,
+    void* cublas_workspace,
+    const ppl::common::TensorShape* output_shape,
     void* output);
 
 }}}}}

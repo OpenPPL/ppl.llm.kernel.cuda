@@ -1,4 +1,19 @@
-
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include "ppl/kernel/llm/cuda/pmx/gelu.h"
 #include "ppl/common/log.h"
@@ -16,13 +31,13 @@ __global__ void gelu_kernel_fp16(
 ) {
     int index = blockIdx.x * blockDim.x + threadIdx.x;
     if(index >= count)  return;
-    float val = __half2float(input[index]);
+    auto val = __half2float(input[index]);
 
-    float out_val = 0;
+    float out_val = 0.f;
     if (APPROXIMATE) {
-        out_val = val * 0.5 * (1 + tanh(0.7978845608028654 * val * (1.0 + 0.044715 * val * val)));
+        out_val = val * 0.5f * (1.f + tanh(0.7978845608028654f * val * (1.0f + 0.044715f * val * val)));
     } else {
-        out_val = val * 0.5 * (1 + erff(val * 0.707106781f));
+        out_val = val * 0.5f * (1.f + erff(val * 0.707106781f));
     }
     if (GATED) {
         auto gate_val = gate[index];
@@ -36,13 +51,13 @@ template<bool GATED, bool APPROXIMATE>
 __global__ void gelu_kernel_packed_fp16(const half2 *input, const half2 *gate, const int64_t count, half2 *output) {
     int index = blockIdx.x * blockDim.x + threadIdx.x;
     if(index >= count) return;
-    half2 h_val = input[index];
-    float2 f_val = __half22float2(input[index]);
+    auto h_val = input[index];
+    auto f_val = __half22float2(input[index]);
 
     half2 t_val;
     if (APPROXIMATE) {
-        t_val.x = __float2half(tanh(0.7978845608028654 * f_val.x * (1.0 + 0.044715 * f_val.x * f_val.x)));
-        t_val.y = __float2half(tanh(0.7978845608028654 * f_val.y * (1.0 + 0.044715 * f_val.y * f_val.y)));
+        t_val.x = __float2half(tanh(0.7978845608028654f * f_val.x * (1.0f + 0.044715f * f_val.x * f_val.x)));
+        t_val.y = __float2half(tanh(0.7978845608028654f * f_val.y * (1.0f + 0.044715f * f_val.y * f_val.y)));
     } else {
         t_val.x = __float2half(erff(f_val.x * 0.707106781f));
         t_val.y = __float2half(erff(f_val.y * 0.707106781f));
@@ -71,11 +86,11 @@ ppl::common::RetCode gelu(
     const ppl::common::TensorShape* input_shape,
     const void* input,
     const void* optional_gate,
-    bool approximate,
+    const bool approximate,
     void* output)
 {
     if (input_shape->GetDataType() != ppl::common::DATATYPE_FLOAT16) {
-        LOG(ERROR) << "Gelu only support fp16, but got ["<< input_shape->GetDataType() << "]";
+        LOG(ERROR) << "gelu only support fp16, but got ["<< input_shape->GetDataType() << "]";
         return ppl::common::RC_UNSUPPORTED;
     }
 
