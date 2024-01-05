@@ -15,19 +15,18 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef __PPL_KERNEL_LLM_CUDA_PMX_GELU_H__
-#define __PPL_KERNEL_LLM_CUDA_PMX_GELU_H__
+#ifndef __PPL_KERNEL_LLM_CUDA_PMX_SWIGLU_H__
+#define __PPL_KERNEL_LLM_CUDA_PMX_SWIGLU_H__
 
 #include "ppl/kernel/llm/cuda/common/general_include.h"
 
 namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pmx {
 
-ppl::common::RetCode gelu(
+ppl::common::RetCode swiglu(
     cudaStream_t stream,
-    const ppl::common::TensorShape* input_shape,
     const void* input,
-    const void* optional_gate,
-    const bool approximate,
+    const float beta,
+    const ppl::common::TensorShape* output_shape,
     void* output);
 
 }}}}}
