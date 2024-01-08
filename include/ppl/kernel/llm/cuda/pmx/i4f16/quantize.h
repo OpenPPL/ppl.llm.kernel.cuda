@@ -26,12 +26,22 @@ namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pm
 
 ppl::common::RetCode minmax_quantize_fp16(
     cudaStream_t stream,
-    const void* input, // [N, K] fp16
+    const void* input, // [N, K], fp16
     const int64_t N,
     const int64_t K, // must aligned 128 now
     const int64_t group_size,
-    void* quantized, // [N / 8, K]
-    void* scale  // [num_of_element / group_size]
+    void* quantized, // [N/4, K], int4x4
+    void* scale  // [K/group_size, N], fp16
+);
+
+ppl::common::RetCode minmax_dequantize_fp16(
+    cudaStream_t stream,
+    const void* input, // [N/4, K], int4x4
+    const void* scale, // [K/group_size, N], fp16
+    const int64_t N,
+    const int64_t K, // must aligned 128 now
+    const int64_t group_size,
+    void* output // [N, K], fp16
 );
 
 }}}}}}
