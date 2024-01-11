@@ -108,6 +108,23 @@ ppl::common::RetCode minmax_requantize_silu_fp16(
     void* scale // [batch] or [M]
 );
 
+ppl::common::RetCode minmax_requantize_swiglu_fp16(
+    cudaStream_t stream,
+    const void* input,    //  col32 layout [batch, quant_dim(channel)] or [M, N]
+    const void* input_scale_per_batch,
+    const void* input_scale_per_channel,
+    const int64_t batch,
+    const int64_t quant_dim,
+    const float beta,
+    const matrix_layout_t layout,
+    const float up_scale,
+    const float down_scale_batch, // batch_scale_val = batch_scale[i] * down_scale_batch for precision
+    const float down_scale_channel, // channel_scale_val = channel_scale[i] * down_scale_channel for precision
+    void* workspace, // [batch, quant_dim(channel)] or [M, N]
+    void* output, // [batch, quant_dim(channel)] or [M, N]
+    void* scale // [batch] or [M]
+);
+
 ppl::common::RetCode skip_rmsnorm_minmax_quantize_fp16(
   const cudaStream_t stream,
   const void* input,           // [batch, hidden dim]
