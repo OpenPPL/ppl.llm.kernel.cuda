@@ -28,12 +28,12 @@ ppl::common::RetCode moe_row_parallel_linear(
     const cublasLtMatmulAlgo_t* algo,
     const ppl::common::TensorShape* input_shape,
     const void* input,
+    const ppl::common::TensorShape* offset_shape,
+    const void* expert_offset,
     const ppl::common::TensorShape* weight_shape,
     const void* weight,
     const ppl::common::TensorShape* bias_shape,
     const void* bias,
-    const ppl::common::TensorShape* offset_shape,
-    const void* expert_offset,
     const int64_t in_features,
     const int64_t out_features,
     const ppl::common::NcclParam* nccl_param,
@@ -67,11 +67,11 @@ ppl::common::RetCode moe_row_parallel_linear(
             continue;
         }
         if (bias != nullptr) {
-            bias_ = (char*)bias + start * N * ppl::common::GetSizeOfDataType(bias_shape->GetDataType());
+            bias_ = (char*)bias + i * N * ppl::common::GetSizeOfDataType(bias_shape->GetDataType());
         }
         const void *input_ = (char*)input + start * Kw * ppl::common::GetSizeOfDataType(input_shape->GetDataType());
-        const void *weight_ = (char*)weight + start * N * Kw * ppl::common::GetSizeOfDataType(weight_shape->GetDataType());
-        void *gemm_output_ = output + start * N * ppl::common::GetSizeOfDataType(output_shape->GetDataType());
+        const void *weight_ = (char*)weight + i * N * Kw * ppl::common::GetSizeOfDataType(weight_shape->GetDataType());
+        void *gemm_output_ = (char*)output + start * N * ppl::common::GetSizeOfDataType(output_shape->GetDataType());
         status = ppl::kernel::llm::cuda::cublas::gemm(
             stream,
             cublaslt_handle,
@@ -95,9 +95,7 @@ ppl::common::RetCode moe_row_parallel_linear(
             N,
             output_shape->GetDataType(),
             gemm_output_);
-    
     }
-
 
     if (ppl::common::RC_SUCCESS != status)
         return status;
