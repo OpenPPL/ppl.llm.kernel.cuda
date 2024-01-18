@@ -36,8 +36,7 @@ struct dynamic_batching_decoding_cache_attention_kernel_param {
     int64_t* kvstarts;
     float attn_scale;
     int64_t layer_idx;
-    int64_t kv_head_shift;       // !!! Use this if (num_heads/num_kv_heads) is power of 2  or zero, otherwise set SHIFT_KV to false.
-    int64_t num_kv_repeats;       // And then we will use this one to compute kv_head_idx, but the performance will lost 10%
+    int64_t num_kv_repeats;
     int64_t query_stride_s;
     int64_t output_stride_s;
     int64_t mask_stride_s;
@@ -240,8 +239,7 @@ template<
     int32_t TPB,
     int32_t QUANT_GROUP,
     int32_t MULTI_BLOCK,    // do flash decoding if more than 1
-    bool ATTN_MASK,
-    bool SHIFT_KV>
+    bool ATTN_MASK>
 __global__
 void dynamic_batching_decoding_cache_attention_fp16_kernel(dynamic_batching_decoding_cache_attention_kernel_param p)
 {
@@ -302,9 +300,7 @@ void dynamic_batching_decoding_cache_attention_fp16_kernel(dynamic_batching_deco
     const int64_t group_lane_id = warp_lane_id % THREAD_GROUP_SIZE;
 
     const int64_t cache_offset_s  = p.cachestarts[batch_idx];
-    const int64_t kv_head_idx     = SHIFT_KV
-                                    ? (head_idx >> p.kv_head_shift)
-                                    : (head_idx / p.num_kv_repeats);
+    const int64_t kv_head_idx     = head_idx / p.num_kv_repeats;
 
     half *attn_mask = nullptr;
     if (ATTN_MASK) {
@@ -714,12 +710,9 @@ dynamic_batch_multi_head_cache_attention_prepare(
     constexpr int64_t TPB = 256;
     constexpr int64_t VPT = 8;
 
-    int64_t kv_head_shift = 0;
-    int64_t kv_repeats = num_heads / num_kv_heads;
-    while (kv_repeats >>= 1)
-        ++kv_head_shift;
-    if ((num_kv_heads << kv_head_shift) != num_heads) {
-        LOG(ERROR) << "currently only support (num_heads/num_kv_heads) is power of 2 or zero.";
+    const int64_t kv_repeats = num_heads / num_kv_heads;
+    if ((num_kv_heads * kv_repeats) != num_heads) {
+        LOG(ERROR) << "num_heads(" << num_heads << ") % num_kv_heads(" << num_kv_heads << ") != 0";
         return {ppl::common::RC_UNSUPPORTED, config};
     }
 
@@ -782,19 +775,19 @@ dynamic_batch_multi_head_cache_attention_prepare(
         decoding_multi_block_size == 1 &&
         decoding_batches > 0) {
         int32_t num_blocks_per_sm = -1;
-        auto kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<64, 4, TPB, 8, 1, false, true>;
+        auto kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<64, 4, TPB, 8, 1, false>;
         switch (head_dim) {
             case 64:
-                kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<64, 4, TPB, 8, 1, false, true>;
+                kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<64, 4, TPB, 8, 1, false>;
                 break;
             case 96:
-                kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<96, 4, TPB, 8, 1, false, true>;
+                kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<96, 4, TPB, 8, 1, false>;
                 break;
             case 128:
-                kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<128, 8, TPB, 8, 1, false, true>;
+                kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<128, 8, TPB, 8, 1, false>;
                 break;
             case 256:
-                kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<256, 16, TPB, 8, 1, false, true>;
+                kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<256, 16, TPB, 8, 1, false>;
                 break;
             default:
                 LOG(ERROR) << "cache flash decoding attention do not support head dim " << head_dim;
@@ -871,8 +864,7 @@ dynamic_batch_multi_head_cache_attention_prepare(
     config.mask_stride_h = mask_stride_h;
 
     config.attn_scale = attn_scale;
-    config.kv_head_shift = kv_head_shift;       // !!! Use this if (num_heads/num_kv_heads) is power of 2  or zero, otherwise set SHIFT_KV to false = .
-    config.num_kv_repeats = kv_repeats;       // And then we will use this one to compute kv_head_idx, but the performance will lost 10 = %
+    config.num_kv_repeats = kv_repeats;
 
     config.decoding_threads_per_block = decoding_threads_per_block;
     config.decoding_shm_size = decoding_shm_size;
@@ -904,21 +896,21 @@ ppl::common::RetCode dynamic_batching_decoding_cache_attention(
 {
     const int64_t RAW_SHM_SIZE = 48 * 1024;
 
-    auto kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<64, 4, TPB, 8, 1, ATTN_MASK, true>;
+    auto kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<64, 4, TPB, 8, 1, ATTN_MASK>;
     if (DO_MULTI_BLOCK) {
-        kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<64, 4, TPB, 8, 32, ATTN_MASK, true>;
+        kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<64, 4, TPB, 8, 32, ATTN_MASK>;
         switch (cfg.head_dim) {
             case 64:
-                kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<64, 4, TPB, 8, 32, ATTN_MASK, true>;
+                kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<64, 4, TPB, 8, 32, ATTN_MASK>;
                 break;
             case 96:
-                kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<96, 4, TPB, 8, 32, ATTN_MASK, true>;
+                kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<96, 4, TPB, 8, 32, ATTN_MASK>;
                 break;
             case 128:
-                kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<128, 8, TPB, 8, 16, ATTN_MASK, true>;
+                kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<128, 8, TPB, 8, 16, ATTN_MASK>;
                 break;
             case 256:
-                kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<256, 16, TPB, 8, 8, ATTN_MASK, true>;
+                kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<256, 16, TPB, 8, 8, ATTN_MASK>;
                 break;
             default:
                 LOG(ERROR) << "cache flash decoding attention do not support head dim " << cfg.head_dim;
@@ -927,16 +919,16 @@ ppl::common::RetCode dynamic_batching_decoding_cache_attention(
     } else {
         switch (cfg.head_dim) {
             case 64:
-                kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<64, 4, TPB, 8, 1, ATTN_MASK, true>;
+                kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<64, 4, TPB, 8, 1, ATTN_MASK>;
                 break;
             case 96:
-                kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<96, 4, TPB, 8, 1, ATTN_MASK, true>;
+                kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<96, 4, TPB, 8, 1, ATTN_MASK>;
                 break;
             case 128:
-                kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<128, 8, TPB, 8, 1, ATTN_MASK, true>;
+                kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<128, 8, TPB, 8, 1, ATTN_MASK>;
                 break;
             case 256:
-                kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<256, 16, TPB, 8, 1, ATTN_MASK, true>;
+                kernel_fn = dynamic_batching_decoding_cache_attention_fp16_kernel<256, 16, TPB, 8, 1, ATTN_MASK>;
                 break;
             default:
                 LOG(ERROR) << "cache flash decoding attention do not support head dim " << cfg.head_dim;
@@ -1018,7 +1010,6 @@ ppl::common::RetCode dynamic_batch_multi_head_cache_attention(
     p.kvstarts = (int64_t*)cfg.kvstarts;
     p.attn_scale = cfg.attn_scale;
     p.layer_idx = cfg.layer_idx;
-    p.kv_head_shift = cfg.kv_head_shift;
     p.num_kv_repeats = cfg.num_kv_repeats;
     p.query_stride_s = cfg.q_stride_s;
     p.output_stride_s = cfg.o_stride_s;
