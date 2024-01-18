@@ -64,7 +64,7 @@ ppl::common::RetCode moe_column_parallel_linear(
             + nccl_param->rank * M * Nw * ppl::common::GetSizeOfDataType(output_shape->GetDataType());
     }
 
-    ppl::common::RetCode status;
+    ppl::common::RetCode status = ppl::common::RC_SUCCESS;
     for (int i = 0; i < num_experts; ++i) {
         const int64_t start = offset64_ptr[i];
         const int64_t end = offset64_ptr[i + 1];
@@ -100,10 +100,11 @@ ppl::common::RetCode moe_column_parallel_linear(
             Nw,
             output_shape->GetDataType(),
             gemm_output_);
+        if (ppl::common::RC_SUCCESS != status) {
+            return status;
+        }
     }
 
-    if (ppl::common::RC_SUCCESS != status)
-        return status;
 
     if (gather_output && nccl_param->size > 1) {
         status = ppl::common::NcclAllGather<half>(
