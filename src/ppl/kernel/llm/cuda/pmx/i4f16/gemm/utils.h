@@ -17,6 +17,8 @@
 
 #pragma once
 
+#include <stdint.h>
+
 #include <cuda_runtime.h>
 
 namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pmx { namespace i4f16 {
@@ -107,7 +109,7 @@ __device__ __forceinline__ void cp_async_fence() {
     asm volatile("cp.async.commit_group;\n" ::);
 }
 
-__device__ void dequantilize(uint32_t value, uint32_t (&result)[4]) {
+__device__ __forceinline__ void dequantilize(uint32_t value, uint32_t (&result)[4]) {
     uint32_t* h = reinterpret_cast<uint32_t*>(result);
     uint32_t const i4s = reinterpret_cast<uint32_t const&>(value);
 
@@ -166,7 +168,7 @@ __device__ void dequantilize(uint32_t value, uint32_t (&result)[4]) {
     asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n" : "=r"(h[3]) : "r"(h[3]), "r"(ONE_SIXTEENTH), "r"(NEG_72));
 }
 
-__device__ uint32_t scale(uint32_t value, uint32_t scale) {
+__device__ __forceinline__ uint32_t scale(uint32_t value, uint32_t scale) {
     uint32_t result = 0;
     asm volatile("mul.f16x2 %0, %1, %2;\n" : "=r"(result) : "r"(value), "r"(scale));
     return result;
@@ -224,7 +226,7 @@ struct global_store {
     }
 };
 
-__device__ Array<uint32_t, 4> scale(const uint32_t (&value)[4], Array<half, 4> scale) {
+__device__ __forceinline__ Array<uint32_t, 4> scale(const uint32_t (&value)[4], Array<half, 4> scale) {
     Array<uint32_t, 4> result;
     const uint32_t* h = reinterpret_cast<const uint32_t*>(value);
     uint32_t* r = reinterpret_cast<uint32_t*>(&result);

@@ -17,6 +17,7 @@
 
 #include "gemm_api.h"
 #include "gemm_runner.h"
+#include "gemv.h"
 
 #include "ppl/common/log.h"
 
@@ -29,10 +30,18 @@ struct GemmAPI::GemmImpl {
                    int n, int k, int group_size, int workspace_size, GemmAlgorithm_t* algo, cudaStream_t stream) {
         switch (group_size) {
             case 128: {
-                if (bias != nullptr) {
-                    gemm_bias.gemm(C, A, B, S, bias, workspace, m, n / 4, k, workspace_size, algo, stream);
+                if(m == 1 || m == 2) {
+                    if (bias != nullptr) {
+                        gemv.run_bias(A, B, S, bias,C, m, n / 4, k, stream);
+                    } else {
+                        gemv.run(A, B, S, C, m, n / 4, k, stream);
+                    }
                 } else {
-                    gemm.gemm(C, A, B, S, bias, workspace, m, n / 4, k, workspace_size, algo, stream);
+                    if (bias != nullptr) {
+                        gemm_bias.gemm(C, A, B, S, bias, workspace, m, n / 4, k, workspace_size, algo, stream);
+                    } else {
+                        gemm.gemm(C, A, B, S, bias, workspace, m, n / 4, k, workspace_size, algo, stream);
+                    }
                 }
                 break;
             }
@@ -46,6 +55,7 @@ struct GemmAPI::GemmImpl {
 
     GemmRunnerImpl<128, false> gemm;
     GemmRunnerImpl<128, true> gemm_bias;
+    Gemv gemv;
 };
 
 GemmAPI::GemmAPI() : impl_(std::make_unique<GemmImpl>()) {}
