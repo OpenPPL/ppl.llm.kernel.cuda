@@ -26,6 +26,7 @@ struct moe_select_config {
     int64_t expert_ids_size;
     int64_t permute_token_idx_size;
     int64_t sort_buffer_size;
+    int64_t temp_buffer_size;
 };
 
 moe_select_config moe_select_prepare(const ppl::common::TensorShape* invert_permutation_shape, const int64_t num_experts);

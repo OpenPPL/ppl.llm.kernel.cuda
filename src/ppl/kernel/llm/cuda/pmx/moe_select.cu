@@ -181,7 +181,17 @@ void moe_topk_softmax_kernel_default(
     }
 }
 
-void moe_topk_softmax(const half* scores, const int64_t tokens, const int64_t dim, const int64_t num_experts, const int64_t num_experts_per_token, half* expert_weights, int64_t* expert_ids, int64_t* permute_token_idx, cudaStream_t stream) {
+void moe_topk_softmax(
+    const half* scores, 
+    const int64_t tokens, 
+    const int64_t dim, 
+    const int64_t num_experts, 
+    const int64_t num_experts_per_token, 
+    half* expert_weights, 
+    int64_t* expert_ids, 
+    int64_t* permute_token_idx, 
+    const cudaStream_t stream) 
+{
 
     const int64_t num_elem = tokens * num_experts;
 
@@ -250,12 +260,22 @@ void moe_topk_softmax(const half* scores, const int64_t tokens, const int64_t di
     }
 }
 
-void sort_pairs(int64_t* key, int64_t* value, void* sort_buffer, const int num_key_value_pairs, size_t sort_buffer_size, const int64_t num_experts, const cudaStream_t stream) {
+void sort_pairs(
+    int64_t* key, 
+    int64_t* value, 
+    void* sort_buffer, 
+    const int num_key_value_pairs, 
+    size_t sort_buffer_size, 
+    const int64_t num_experts, 
+    const cudaStream_t stream) 
+{
     cub::DeviceRadixSort::SortPairs(sort_buffer, sort_buffer_size, key, key, value, value, num_key_value_pairs, 0, (int)(log2(num_experts)) + 1, stream);
 }
 
-moe_select_config moe_select_prepare(const ppl::common::TensorShape* invert_permutation_shape, const int64_t num_experts) {
-
+moe_select_config moe_select_prepare(
+    const ppl::common::TensorShape* invert_permutation_shape, 
+    const int64_t num_experts) 
+{
     const int64_t expand_tokens = invert_permutation_shape->CalcElementsExcludingPadding();
 
     moe_select_config config;
@@ -269,12 +289,13 @@ moe_select_config moe_select_prepare(const ppl::common::TensorShape* invert_perm
     config.expert_ids_size = expand_tokens * sizeof(int64_t);
     config.permute_token_idx_size = expand_tokens * sizeof(int64_t);
     config.sort_buffer_size = temp_storage_bytes;
+    config.temp_buffer_size = config.expert_ids_size + config.permute_token_idx_size + config.sort_buffer_size;
 
     return config;
 }
 
 __device__ 
-int findTotalEltsLeqTarget(const int64_t* sorted_indices, const int arr_length, const int target) {
+int find_right_bound(const int64_t* sorted_indices, const int arr_length, const int target) {
     int64_t low = 0, high = arr_length - 1, target_location = -1;
     while (low <= high) {
         int64_t mid = (low + high) / 2;
@@ -291,8 +312,12 @@ int findTotalEltsLeqTarget(const int64_t* sorted_indices, const int arr_length, 
 }
 
 __global__ 
-void compute_offset_kernel(const int64_t* sorted_expert_indices, const int num_expand_tokens, const int num_experts, int64_t* expert_offset) {
-
+void compute_offset_kernel(
+    const int64_t* sorted_expert_indices, 
+    const int num_expand_tokens, 
+    const int num_experts, 
+    int64_t* expert_offset) 
+{
     const int expert = blockIdx.x * blockDim.x + threadIdx.x;
     if (expert >= num_experts) {
         return;
@@ -302,17 +327,31 @@ void compute_offset_kernel(const int64_t* sorted_expert_indices, const int num_e
         expert_offset[0] = 0;
     }
 
-    expert_offset[expert + 1] = findTotalEltsLeqTarget(sorted_expert_indices, num_expand_tokens, expert);
+    expert_offset[expert + 1] = find_right_bound(sorted_expert_indices, num_expand_tokens, expert);
 }
 
-void compute_offset(const int64_t* sorted_expert_indices, const int num_expand_tokens, const int num_experts, int64_t* expert_offset, const cudaStream_t stream) {
+void compute_offset(
+    const int64_t* sorted_expert_indices, 
+    const int num_expand_tokens, 
+    const int num_experts, 
+    int64_t* expert_offset, 
+    const cudaStream_t stream) 
+{
     const int threads = std::min(256, num_experts);
     const int blocks = (num_experts + threads - 1) / threads;
     
     compute_offset_kernel<<<blocks, threads, 0, stream>>>(sorted_expert_indices, num_expand_tokens, num_experts, expert_offset);
 }
 
-__global__ void expand_permute_kernel(const half* x, const int64_t* token_idx_dest2source, const int num_tokens, int cols, const int repeats, half* y, int64_t* token_idx_source2dest) {
+__global__ void expand_permute_kernel(
+    const half* x, 
+    const int64_t* token_idx_dest2source, 
+    const int num_tokens, 
+    int cols, 
+    const int repeats, 
+    half* y, 
+    int64_t* token_idx_source2dest) 
+{
     const int64_t dest_row = blockIdx.x;
 
     const int64_t expanded_source_row = token_idx_dest2source[dest_row];
@@ -331,7 +370,16 @@ __global__ void expand_permute_kernel(const half* x, const int64_t* token_idx_de
     }
 }
 
-void expand_permute(const half* x, const int64_t* token_idx_dest2source, int num_tokens, int cols, int repeats, half* y, int64_t* token_idx_source2dest, const cudaStream_t stream) {
+void expand_permute(
+    const half* x, 
+    const int64_t* token_idx_dest2source, 
+    int num_tokens, 
+    int cols, 
+    int repeats, 
+    half* y, 
+    int64_t* token_idx_source2dest, 
+    const cudaStream_t stream) 
+{
     const int TPB = min(1024, cols);
     const int BPG = num_tokens * repeats;
     expand_permute_kernel<<<BPG, TPB, 0, stream>>>(x, token_idx_dest2source, num_tokens, cols, repeats, y, token_idx_source2dest);
@@ -352,12 +400,6 @@ ppl::common::RetCode moe_select(
     void* invert_permutation,
     void* expert_offset)
 {
-    
-    if (ppl::common::DATATYPE_FLOAT16 != x_shape->GetDataType()) {
-        LOG(ERROR) << "moe_select only support fp16, but got ["<< x_shape->GetDataType() << "]";
-        return ppl::common::RC_UNSUPPORTED;
-    }
-    
     if (scores_shape->GetDim(scores_shape->GetDimCount() - 1) != num_experts) {
         LOG(ERROR) << "scores_shape[-1] != num_experts";
         return ppl::common::RC_OTHER_ERROR;

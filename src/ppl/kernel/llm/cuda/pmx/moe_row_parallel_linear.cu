@@ -44,14 +44,16 @@ ppl::common::RetCode moe_row_parallel_linear(
     const ppl::common::TensorShape* output_shape,
     void* output)
 {
+    // input [seqlen * num_experts_per_token, hidden_dim]
+    // weight [num_experts_per_token, hidden_dim_out/w, hidden_dim]
+    // offset [num_experts_per_token + 1]
+    // gemm_output [seqlen * num_experts_per_token, hidden_dim_out/w]
+    // output [seqlen * num_experts_per_token, hidden_dim_out]
+
     if (!input_is_parallel) {
         LOG(ERROR) << "currnetly only support parallel input";
         return ppl::common::RC_UNSUPPORTED;
     }
-
-    // input [seqlen * num_experts_per_token, hidden_dim/w]
-    // weight [num_experts_per_token, hidden_dim_out, hidden_dim/w]
-    // output [seqlen * num_experts_per_token, hidden_dim_out]
 
     const int64_t M = input_shape->CalcElementsToDimensionExcludingPadding(input_shape->GetDimCount() - 1);
     const int64_t N = out_features;
@@ -59,7 +61,7 @@ ppl::common::RetCode moe_row_parallel_linear(
     const int64_t* offset64_ptr = (const int64_t*)expert_offset;
     const int64_t num_experts = weight_shape->GetDim(0);
     const void *bias_ = nullptr;
-    ppl::common::RetCode status;
+    ppl::common::RetCode status = ppl::common::RC_SUCCESS;;
     for (int i = 0; i < num_experts; ++i) {
         const int64_t start = offset64_ptr[i];
         const int64_t end = offset64_ptr[i + 1];
@@ -95,10 +97,11 @@ ppl::common::RetCode moe_row_parallel_linear(
             N,
             output_shape->GetDataType(),
             gemm_output_);
-    }
 
-    if (ppl::common::RC_SUCCESS != status)
-        return status;
+        if (ppl::common::RC_SUCCESS != status) {
+            return status;
+        }
+    }
 
     if (nccl_param->size > 1) {
         return ppl::common::NcclAllReduceSum<half>(

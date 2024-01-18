@@ -25,9 +25,14 @@
 namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pmx {
 
 __global__ 
-void moe_reduce_sum_kernel(const half* y_expand_permute,  const half* expert_weights, const int64_t* invert_permutation, const int64_t cols, const int64_t num_experts_per_token, half* y_reduced) {
-    // expand后的排布[0,0,0,1,1,1]
-
+void moe_reduce_sum_kernel(
+    const half* y_expand_permute,  
+    const half* expert_weights, 
+    const int64_t* invert_permutation, 
+    const int64_t cols, 
+    const int64_t num_experts_per_token, 
+    half* y_reduced) 
+{
     for(int col_id=threadIdx.x; col_id < cols; col_id += blockDim.x) {
 
         const int64_t origin_row = blockIdx.x;
@@ -57,13 +62,8 @@ ppl::common::RetCode moe_reduce(
     const void* expert_weights,     // [tokens, num_experts_per_token]
     const void* invert_permutation, // [tokens, num_experts_per_token]
     const int64_t num_experts_per_token,
-    void* y_reduced) {
-
-    if (ppl::common::DATATYPE_FLOAT16 != y_expand_permute_shape->GetDataType()) {
-        LOG(ERROR) << "moe_select only support fp16, but got ["<< y_expand_permute_shape->GetDataType() << "]";
-        return ppl::common::RC_UNSUPPORTED;
-    }
-
+    void* y_reduced) 
+{
     if (y_expand_permute_shape->GetDim(y_expand_permute_shape->GetDimCount() - 2) != num_experts_per_token) {
         LOG(ERROR) << "Y_expand_permute.shape[-2] != num_experts_per_token";
         return ppl::common::RC_OTHER_ERROR;
