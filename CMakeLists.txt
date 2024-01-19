@@ -4,6 +4,8 @@ project(ppl.llm.kernel.cuda)
 
 # options
 option(PPLNN_CUDA_ENABLE_NCCL "enable nccl" OFF)
+option(PPLNN_ENABLE_PYTHON_API "" OFF)
+option(PPLNN_INSTALL "" ON)
 
 if(MSVC)
     option(PPLNN_USE_MSVC_STATIC_RUNTIME "" ON)
@@ -78,6 +80,10 @@ unset(__CUTLASS_SOURCE_DIR__)
 unset(__PPLNN_CUTLASS_INCLUDE_DIRECTORIES__)
 
 list(APPEND PPLNN_CUDA_EXTERNAL_LINK_LIBRARIES cublasLt)
+
+if(PPLNN_ENABLE_PYTHON_API)
+    add_subdirectory(python)
+endif()
 
 hpcc_populate_dep(ppl.kernel.cuda)
 
