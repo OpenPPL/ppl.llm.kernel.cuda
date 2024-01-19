@@ -96,3 +96,26 @@ set(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
 
 hpcc_declare_git_dep(cutlass
     https://github.com/NVIDIA/cutlass.git v3.2.2)
+
+# --------------------------------------------------------------------------- #
+
+set(PYBIND11_INSTALL OFF CACHE BOOL "disable pybind11 installation")
+set(PYBIND11_TEST OFF CACHE BOOL "disable pybind11 tests")
+set(PYBIND11_NOPYTHON ON CACHE BOOL "do not find python")
+set(PYBIND11_FINDPYTHON OFF CACHE BOOL "do not find python")
+
+set(__PYBIND11_TAG__ v2.9.2)
+
+if(PPLNN_DEP_PYBIND11_PKG)
+    hpcc_declare_pkg_dep(pybind11
+        ${PPLNN_DEP_PYBIND11_PKG})
+elseif(PPLNN_DEP_PYBIND11_GIT)
+    hpcc_declare_git_dep(pybind11
+        ${PPLNN_DEP_PYBIND11_GIT}
+        ${__PYBIND11_TAG__})
+else()
+    hpcc_declare_pkg_dep(pybind11
+        "https://github.com/pybind/pybind11/archive/refs/tags/${__PYBIND11_TAG__}.zip")
+endif()
+
+unset(__PYBIND11_TAG__)
