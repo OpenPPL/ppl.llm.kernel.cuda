@@ -32,7 +32,7 @@ ppl::common::RetCode moe_column_parallel_linear(
     const ppl::common::TensorShape* input_shape,
     const void* input,
     const ppl::common::TensorShape* offset_shape,
-    const void* expert_offset,
+    const void* expert_offset_host,
     const ppl::common::TensorShape* weight_shape,
     const void* weight,
     const ppl::common::TensorShape* bias_shape,

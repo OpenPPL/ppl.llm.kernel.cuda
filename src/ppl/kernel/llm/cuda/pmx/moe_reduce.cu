@@ -29,11 +29,11 @@ void moe_reduce_sum_kernel(
     const half* y_expand_permute,  
     const half* expert_weights, 
     const int64_t* invert_permutation, 
-    const int64_t cols, 
+    const int64_t cols,
     const int64_t num_experts_per_token, 
-    half* y_reduced) 
+    half* y_reduced)
 {
-    for(int col_id=threadIdx.x; col_id < cols; col_id += blockDim.x) {
+    for (int32_t col_id = threadIdx.x; col_id < cols; col_id += blockDim.x) {
 
         const int64_t origin_row = blockIdx.x;
         half* reduced_row_ptr = y_reduced + origin_row * cols;
@@ -47,7 +47,7 @@ void moe_reduce_sum_kernel(
             const half* expanded_permuted_row_ptr = y_expand_permute + expand_permuted_row * cols;
 
             const half row_scale = expert_weights[expand_origin_row];
-            
+
             thread_output = thread_output + row_scale * expanded_permuted_row_ptr[col_id];
         }
 
@@ -69,13 +69,11 @@ ppl::common::RetCode moe_reduce(
         return ppl::common::RC_OTHER_ERROR;
     }
 
-    const int64_t expand_tokens = y_expand_permute_shape->CalcElementsToDimensionExcludingPadding(y_expand_permute_shape->GetDimCount() - 1);
-    const int64_t tokens = expand_tokens / num_experts_per_token;
-
+    const int64_t tokens = y_expand_permute_shape->CalcElementsToDimensionExcludingPadding(y_expand_permute_shape->GetDimCount() - 2);
     const int64_t dim = y_expand_permute_shape->GetDim(y_expand_permute_shape->GetDimCount() - 1);
 
-    const int TPB = min(1024, (int32_t)dim);
-    const int BPG = tokens;
+    const int32_t TPB = min(512, (int32_t)dim);
+    const int32_t BPG = tokens;
     
     moe_reduce_sum_kernel<<<BPG, TPB, 0, stream>>>(
         (half*)y_expand_permute, 
