@@ -31,7 +31,7 @@ ppl::common::RetCode moe_column_parallel_linear(
     const ppl::common::TensorShape* input_shape,
     const void* input,
     const ppl::common::TensorShape* offset_shape,
-    const void* expert_offset,
+    const void* expert_offset_host,
     const ppl::common::TensorShape* weight_shape,
     const void* weight,
     const ppl::common::TensorShape* bias_shape,
@@ -56,8 +56,10 @@ ppl::common::RetCode moe_column_parallel_linear(
     const int64_t M = input_shape->CalcElementsToDimensionExcludingPadding(input_shape->GetDimCount() - 1);
     const int64_t Nw = out_features / nccl_param->size;
     const int64_t K = in_features;
-    const int64_t* offset64_ptr = (const int64_t*)expert_offset;
+
+    const int64_t* offset64_ptr = (const int64_t*)expert_offset_host;
     const void *bias_ = nullptr;
+
     void *gemm_output = output;
     if (gather_output && nccl_param->size > 1) {
         gemm_output = (char*)gather_buffer
@@ -65,18 +67,21 @@ ppl::common::RetCode moe_column_parallel_linear(
     }
 
     ppl::common::RetCode status = ppl::common::RC_SUCCESS;
-    for (int i = 0; i < num_experts; ++i) {
+    for (int32_t i = 0; i < num_experts; ++i) {
         const int64_t start = offset64_ptr[i];
         const int64_t end = offset64_ptr[i + 1];
+
         if (end - start <= 0) {
             continue;
         }
+
         if (bias != nullptr) {
             bias_ = (char*)bias + i * Nw * ppl::common::GetSizeOfDataType(bias_shape->GetDataType());
         }
         const void *input_ = (char*)input + start * K * ppl::common::GetSizeOfDataType(input_shape->GetDataType());
         const void *weight_ = (char*)weight + i * Nw * K * ppl::common::GetSizeOfDataType(weight_shape->GetDataType());
         void *gemm_output_ = (char*)gemm_output + start * Nw * ppl::common::GetSizeOfDataType(output_shape->GetDataType());
+
         status = ppl::kernel::llm::cuda::cublas::gemm(
             stream,
             cublaslt_handle,
