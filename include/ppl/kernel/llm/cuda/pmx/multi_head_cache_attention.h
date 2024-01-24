@@ -22,7 +22,7 @@
 
 namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pmx {
 
-struct dynamic_batch_multi_head_cache_attention_config {
+struct dynamic_batching_multi_head_cache_attention_config {
     cudaDeviceProp* device_prop;
 
     ppl::common::TensorShape* query_shape;
@@ -73,6 +73,8 @@ struct dynamic_batch_multi_head_cache_attention_config {
 
     float attn_scale;
     int64_t num_kv_repeats;
+    bool use_infinity_mhca;
+    bool use_infinity_gqca;
 
     int64_t decoding_threads_per_block;
     int64_t decoding_shm_size;
@@ -86,8 +88,8 @@ struct dynamic_batch_multi_head_cache_attention_config {
     void* temp_buffer;
 };
 
-std::pair<ppl::common::RetCode, dynamic_batch_multi_head_cache_attention_config>
-dynamic_batch_multi_head_cache_attention_prepare(
+std::pair<ppl::common::RetCode, dynamic_batching_multi_head_cache_attention_config>
+dynamic_batching_multi_head_cache_attention_prepare(
     const cudaStream_t stream,
     const cudaDeviceProp& device_prop,
     const ppl::common::TensorShape* query_shape,
@@ -122,9 +124,9 @@ dynamic_batch_multi_head_cache_attention_prepare(
     const ppl::common::TensorShape* output_shape,
     void* output); // (S, .., D)
 
-ppl::common::RetCode dynamic_batch_multi_head_cache_attention(
+ppl::common::RetCode dynamic_batching_multi_head_cache_attention(
     const cudaStream_t stream,
-    const dynamic_batch_multi_head_cache_attention_config &cfg);
+    const dynamic_batching_multi_head_cache_attention_config &cfg);
 
 }}}}}
 
