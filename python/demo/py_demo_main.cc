@@ -15,13 +15,14 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include "pybind11/pybind11.h"
-#include "demo/py_demo_main.h"
+#include "py_demo_main.h"
+#include "py_identity.h"
 
 namespace ppl { namespace nn { namespace python {
 
-PYBIND11_MODULE(cuda, m) {
-    RegisterDemo(&m);
+void RegisterDemo(pybind11::module* m) {
+    auto sub = m->def_submodule("demo");
+    sub.def("identity", &DemoIdentity);
 }
 
 }}}

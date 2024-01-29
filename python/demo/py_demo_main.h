@@ -15,13 +15,15 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#ifndef __PPL_KERNEL_LLM_CUDA_PYTHON_DEMO_MAIN_H__
+#define __PPL_KERNEL_LLM_CUDA_PYTHON_DEMO_MAIN_H__
+
 #include "pybind11/pybind11.h"
-#include "demo/py_demo_main.h"
 
 namespace ppl { namespace nn { namespace python {
 
-PYBIND11_MODULE(cuda, m) {
-    RegisterDemo(&m);
-}
+void RegisterDemo(pybind11::module*);
 
 }}}
+
+#endif

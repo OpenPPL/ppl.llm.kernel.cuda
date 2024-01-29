@@ -1,4 +1,10 @@
+option(PPLNN_ENABLE_TORCH_API "" OFF)
+
 hpcc_populate_dep(pybind11)
+
+# --------------------------------------------------------------------------- #
+
+# python
 
 set(__python_soabi__ )
 
@@ -39,6 +45,21 @@ endif()
 
 # --------------------------------------------------------------------------- #
 
+# libtorch
+
+if(PPLNN_ENABLE_TORCH_API)
+    if(PPLNN_LIBTORCH_DIR)
+        set(Torch_DIR ${PPLNN_LIBTORCH_DIR}/share/cmake/Torch)
+    endif()
+    find_package(Torch QUIET)
+    if(NOT Torch_FOUND)
+        message(FATAL_ERROR "cannot find libtorch. set `PPLNN_LIBTORCH_DIR` and try again.")
+    endif()
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
+endif()
+
+# --------------------------------------------------------------------------- #
+
 file(GLOB_RECURSE __PPLNN_PYTHON_API_SRC__
     ${CMAKE_CURRENT_SOURCE_DIR}/*.cc)
 add_library(pyppl_kernel_cuda_shared SHARED ${__PPLNN_PYTHON_API_SRC__})
@@ -50,6 +71,10 @@ target_include_directories(pyppl_kernel_cuda_shared PRIVATE
     ${PROJECT_SOURCE_DIR}/include
     ${pybind11_SOURCE_DIR}/include
     ${PYTHON3_INCLUDE_DIRS})
+
+if(PPLNN_ENABLE_TORCH_API)
+    target_link_libraries(pyppl_kernel_cuda_shared PUBLIC ${TORCH_LIBRARIES})
+endif()
 
 # --------------------------------------------------------------------------- #
 

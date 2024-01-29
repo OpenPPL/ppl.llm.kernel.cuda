@@ -15,13 +15,13 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include "pybind11/pybind11.h"
-#include "demo/py_demo_main.h"
+#include "py_identity.h"
 
 namespace ppl { namespace nn { namespace python {
 
-PYBIND11_MODULE(cuda, m) {
-    RegisterDemo(&m);
+// refer to https://pytorch.org/cppdocs/api/classat_1_1_tensor.html for at::Tensor details.
+at::Tensor DemoIdentity(const at::Tensor& t) {
+    return t.clone();
 }
 
 }}}

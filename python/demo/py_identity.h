@@ -15,13 +15,16 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#ifndef __PPL_KERNEL_LLM_CUDA_PMX_DEMO_IDENTITY_H__
+#define __PPL_KERNEL_LLM_CUDA_PMX_DEMO_IDENTITY_H__
+
 #include "pybind11/pybind11.h"
-#include "demo/py_demo_main.h"
+#include "ATen/ATen.h"
 
 namespace ppl { namespace nn { namespace python {
 
-PYBIND11_MODULE(cuda, m) {
-    RegisterDemo(&m);
-}
+at::Tensor DemoIdentity(const at::Tensor& t);
 
 }}}
+
+#endif
