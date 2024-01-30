@@ -271,8 +271,9 @@ ppl::common::RetCode layer_norm(
     void* skip_out)
 {
 
-    if(input_shape->GetDataType() != ppl::common::DATATYPE_FLOAT16) {
-      LOG(ERROR) << "LayerNorm only support fp16, but got ["<< input_shape->GetDataType() << "]";
+    if (input_shape->GetDataType() != ppl::common::DATATYPE_FLOAT16) {
+        LOG(ERROR) << "LayerNorm only support fp16, but got ["<< input_shape->GetDataType() << "]";
+        return ppl::common::RC_UNSUPPORTED;
     }
     constexpr int32_t VPT = 16 / sizeof(half);
 
