@@ -27,7 +27,7 @@ namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pm
 
 struct GemmAPI::GemmImpl {
     ppl::common::RetCode run(void* C, const void* A, const void* B, const void* S, const void* bias, void* workspace, int m,
-                   int n, int k, int group_size, int workspace_size, GemmAlgorithm_t* algo, cudaStream_t stream) {
+                   int n, int k, int group_size, size_t workspace_size, GemmAlgorithm_t* algo, cudaStream_t stream) {
         switch (group_size) {
             case 128: {
                 if(m == 1 || m == 2) {
@@ -63,7 +63,7 @@ GemmAPI::GemmAPI() : impl_(std::make_unique<GemmImpl>()) {}
 GemmAPI::~GemmAPI() = default;
 
 ppl::common::RetCode GemmAPI::Execute(void* C, const void* A, const void* B, const void* S, const void* bias, void* workspace,
-                               int m, int n, int k, int group_size, int workspace_size, GemmAlgorithm_t* algo,
+                               int m, int n, int k, int group_size, size_t workspace_size, GemmAlgorithm_t* algo,
                                cudaStream_t stream) const {
     return impl_->run(C, A, B, S, bias, workspace, m, n, k, group_size, workspace_size, algo, stream);
 }

@@ -32,7 +32,7 @@ public:
     ~GemmAPI();
 
     ppl::common::RetCode Execute(void* C, const void* A, const void* B, const void* S, const void* bias, void* workspace,
-                          int m, int n, int k, int group_size, int workspace_size, GemmAlgorithm_t* algo = nullptr,
+                          int m, int n, int k, int group_size, size_t workspace_size, GemmAlgorithm_t* algo = nullptr,
                           cudaStream_t st = nullptr) const;
 private:
     struct GemmImpl;
