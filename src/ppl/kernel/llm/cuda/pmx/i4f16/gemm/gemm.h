@@ -61,8 +61,8 @@ struct Gemm {
     float reg_u_c_[(IterShape::kN) * (IterShape::kM) * 4][4];
     float reg_s_c_[(IterShape::kN) * (IterShape::kM) * 4][4];
 
-    mutable int warp_idx_{};
-    mutable int lane_idx_{};
+    mutable uint32_t warp_idx_{};
+    mutable uint32_t lane_idx_{};
     mutable bool is_store_thread_{};
 
     template <typename T, int N, int M>
@@ -87,10 +87,10 @@ struct Gemm {
         }
     }
 
-    __inline__ __device__ void store(const float4& data, int m, int n, half* C, int M, int N) {
+    __inline__ __device__ void store(const float4& data, uint32_t m, uint32_t n, half* C, uint32_t M, uint32_t N) {
         float4* c_f4 = reinterpret_cast<float4*>(C);
-        const bool guard = ((n) < (N) && m < M);
-        global_store(data, (void*)(&c_f4[(m * N + n) / 2]), guard);
+        const uint64_t idx = m * N + n;
+        global_store(data, (void*)(&c_f4[idx / 2]), (n < N && m < M));
     }
 
     __device__ void operator()(void* __restrict__ C, void* __restrict__ temp_C, const void* __restrict__ A,
@@ -382,15 +382,15 @@ struct Gemm {
         }
     }
 
-    __device__ void loadb(const void* bias, int m, int n, int M, int N, uint4& data) {
+    __device__ void loadb(const void* bias, uint32_t m, uint32_t n, uint32_t M, uint32_t N, uint4& data) {
         const float4* bias_f4 = reinterpret_cast<const float4*>(bias);
-        const bool guard = ((n) < (N) && m < M);
-        const void* addr = (const void*)(&bias_f4[(m * N + n) / 2]);
-        loadg(data.x, data.y, data.z, data.w, addr, guard);
+        const uint64_t idx = m * N + n;
+        const void* addr = (const void*)(&bias_f4[idx / 2]);
+        loadg(data.x, data.y, data.z, data.w, addr, (n < N && m < M));
     }
 
-    __device__ void store_result(const float* reg_c, const void* bias, float* cache_c, half* C, int m, int n, int cta_m,
-                                 int cta_n, int warp_idx_m, int warp_idx_n) {
+    __device__ void store_result(const float* reg_c, const void* bias, float* cache_c, half* C, uint32_t m, uint32_t n, uint32_t cta_m,
+                                 uint32_t cta_n, uint32_t warp_idx_m, uint32_t warp_idx_n) {
         if (!is_store_thread_) {
             return;
         }
@@ -399,14 +399,14 @@ struct Gemm {
         if constexpr (Mma::kBias) {
             if (blockIdx.z == 0) {
 #pragma unroll
-                for (int i = 0; i < IterShape::kM; ++i) {
-                    const int mm = cta_m + warp_idx_m * WarpShape::kM + i * Mma::MmaShape::kM + lane_idx_ / 4;
+                for (uint32_t i = 0; i < IterShape::kM; ++i) {
+                    const uint32_t mm = cta_m + warp_idx_m * (uint32_t)WarpShape::kM + i * (uint32_t)Mma::MmaShape::kM + lane_idx_ / 4;
 #pragma unroll
-                    for (int x = 0; x < 2; ++x) {
+                    for (uint32_t x = 0; x < 2; ++x) {
 #pragma unroll
-                        for (int j = 0; j < IterShape::kN; ++j) {
-                            const int nn =
-                                cta_n + warp_idx_n * WarpShape::kN + j * Mma::MmaShape::kN + lane_idx_ % 4 * 2;
+                        for (uint32_t j = 0; j < IterShape::kN; ++j) {
+                            const uint32_t nn =
+                                cta_n + warp_idx_n * (uint32_t)WarpShape::kN + j * (uint32_t)Mma::MmaShape::kN + lane_idx_ % 4 * 2;
                             float4& frag_b_f4 = temp_b[i][x][j];
                             loadb(bias, (mm + x * 8), nn, m, n, reinterpret_cast<uint4&>(frag_b_f4));
                         }
@@ -449,13 +449,13 @@ struct Gemm {
         }
 
 #pragma unroll
-        for (int i = 0; i < IterShape::kM; ++i) {
-            const int mm = cta_m + warp_idx_m * WarpShape::kM + i * Mma::MmaShape::kM + lane_idx_ / 4;
+        for (uint32_t i = 0; i < IterShape::kM; ++i) {
+            const uint64_t mm = cta_m + warp_idx_m * (uint32_t)WarpShape::kM + i * (uint32_t)Mma::MmaShape::kM + lane_idx_ / 4;
 #pragma unroll
-            for (int x = 0; x < 2; ++x) {
+            for (uint32_t x = 0; x < 2; ++x) {
 #pragma unroll
-                for (int j = 0; j < IterShape::kN; ++j) {
-                    const int nn = cta_n + warp_idx_n * WarpShape::kN + j * Mma::MmaShape::kN + lane_idx_ % 4 * 2;
+                for (uint32_t j = 0; j < IterShape::kN; ++j) {
+                    const uint32_t nn = cta_n + warp_idx_n * (uint32_t)WarpShape::kN + j * (uint32_t)Mma::MmaShape::kN + lane_idx_ % 4 * 2;
                     float4& frag_c_f4 = temp_c[i][x][j];
                     store(reinterpret_cast<float4&>(frag_c_f4), (mm + x * 8), nn, C, m, n);
                 }
@@ -474,9 +474,9 @@ __global__ __launch_bounds__(Gemm::Mma::kThreads) void gemm_kernel(void* __restr
     const int k_base = blockIdx.z * batchs;
     const int k_nums = (blockIdx.z == (gridDim.z - 1)) ? K - k_base : batchs;
 
-    half* temp_c_base = reinterpret_cast<half*>(workspace);
-    half* temp_c = temp_c_base + M * N * 4 * blockIdx.z;
-    gemm((void*)C, (void*)temp_c, (void*)A, (void*)B, (void*)S, M, N, K, batchs, k_nums, bias);
+    uint64_t offset = (uint32_t)M * (uint32_t)N * 4 * blockIdx.z;
+    half* temp = reinterpret_cast<half*>(workspace) + offset;
+    gemm((void*)C, (void*)temp, (void*)A, (void*)B, (void*)S, M, N, K, batchs, k_nums, bias);
 }
 
 }}}}}} // namespace ppl::kernel::llm::cuda::pmx::i4f16

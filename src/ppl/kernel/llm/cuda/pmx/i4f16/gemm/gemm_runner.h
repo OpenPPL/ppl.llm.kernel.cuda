@@ -31,9 +31,9 @@ struct GemmRunner {
     virtual ~GemmRunner() = default;
 
     virtual ppl::common::RetCode gemm(void* C, const void* A, const void* B, const void* S, const void* bias, void* workspace,
-                            int M, int N, int K, int workspace_size, GemmAlgorithm_t* algo, cudaStream_t st) = 0;
+                            int M, int N, int K, size_t workspace_size, GemmAlgorithm_t* algo, cudaStream_t st) = 0;
 
-    virtual ppl::common::RetCode get_algo(int M, int N, int K, int workspace_size, GemmAlgorithm_t* algo) = 0;
+    virtual ppl::common::RetCode get_algo(int M, int N, int K, size_t workspace_size, GemmAlgorithm_t* algo) = 0;
 };
 
 template <int GroupSize, bool Bias>
@@ -280,7 +280,7 @@ struct GemmRunnerImpl : public GemmRunner {
         return config;
     }
 
-    static ppl::common::RetCode can_implement(int M, int N, int K, int workspace_size, GemmAlgorithm_t* algo) {
+    static ppl::common::RetCode can_implement(int M, int N, int K, size_t workspace_size, GemmAlgorithm_t* algo) {
         if (N % 8 != 0 || K % 64 != 0) {
             return ppl::common::RC_UNSUPPORTED;
         }
@@ -347,7 +347,7 @@ struct GemmRunnerImpl : public GemmRunner {
         return algo;
     }
 
-    ppl::common::RetCode get_algo(int M, int N, int K, int workspace_size, GemmAlgorithm_t* algo) override {
+    ppl::common::RetCode get_algo(int M, int N, int K, size_t workspace_size, GemmAlgorithm_t* algo) override {
         GemmConfig config;
 
         if (algo == nullptr) {
@@ -374,7 +374,7 @@ struct GemmRunnerImpl : public GemmRunner {
     }
 
     ppl::common::RetCode gemm(void* C, const void* A, const void* B, const void* S, const void* bias, void* workspace, int M,
-                    int N, int K, int workspace_size, GemmAlgorithm_t* algo, cudaStream_t st) override {
+                    int N, int K, size_t workspace_size, GemmAlgorithm_t* algo, cudaStream_t st) override {
         GemmConfig config;
         ppl::common::RetCode status;
 

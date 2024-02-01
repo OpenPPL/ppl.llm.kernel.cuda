@@ -22,10 +22,10 @@
 
 namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pmx { namespace i4f16 {
 
-bool is_config_valid(const TileShape& tile_shape, int M, int N, int K, int workspace_size, const int splitk_factor,
+bool is_config_valid(const TileShape& tile_shape, int M, int N, int K, size_t workspace_size, const int splitk_factor,
                      const int group_size) {
-    const size_t workspace_size_min = splitk_factor * M * N * 4 * sizeof(half);
-    if (splitk_factor > 1 && (size_t)workspace_size < workspace_size_min) {
+    const size_t workspace_size_min = (size_t)splitk_factor * (size_t)M * (size_t)N * 4 * sizeof(half);
+    if (splitk_factor > 1 && workspace_size < workspace_size_min) {
         return false;
     }
 

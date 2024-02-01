@@ -89,7 +89,7 @@ struct ScoreComponent {
 
 std::vector<GemmConfig> get_candidate_configs(int sm, int m, const bool simt_configs_only);
 
-bool is_config_valid(const TileShape& shape, int M, int N, int K, int workspace_size, const int splitk_factor,
+bool is_config_valid(const TileShape& shape, int M, int N, int K, size_t workspace_size, const int splitk_factor,
                      const int group_size);
 
 GemmConfig estimate_best_config_from_occupancies(const std::vector<GemmConfig>& candidate_configs,
