@@ -26,6 +26,7 @@ template<bool GATED>
 __global__ void silu_kernel_fp16(
     const half *input,
     const half *gate,
+    const float beta,
     const int64_t num_elem,
     half *output)
 {
@@ -37,9 +38,19 @@ __global__ void silu_kernel_fp16(
     auto val = __half2float(input[index]);
     if (GATED) {
         auto gate_val = gate[index];
-        output[index] = __float2half(val / (1.f + __expf(-val))) * gate_val;
+        if (beta != 1.f) {
+            output[index] = __float2half(val / (1.f + __expf(beta * -val))) * gate_val;
+        }
+        else {
+            output[index] = __float2half(val / (1.f + __expf(-val))) * gate_val;
+        }
     } else {
-        output[index] = __float2half(val / (1.f + __expf(-val)));
+        if (beta != 1.f) {
+            output[index] = __float2half(val / (1.f + __expf(beta * -val)));
+        }
+        else {
+            output[index] = __float2half(val / (1.f + __expf(-val)));
+        }
     }
 }
 
@@ -48,6 +59,7 @@ template<bool GATED>
 __global__ void silu_kernel_packed_fp16(
     const half2 *input,
     const half2 *gate,
+    const float beta,
     const int64_t num_elem,
     half2 *output)
 {
@@ -59,15 +71,31 @@ __global__ void silu_kernel_packed_fp16(
     auto val = __half22float2(input[index]);
     if (GATED) {
         auto gate_val = gate[index];
-        output[index] = {
-            __float2half(val.x / (1.f + __expf(-val.x))) * gate_val.x,
-            __float2half(val.y / (1.f + __expf(-val.y))) * gate_val.y,
-        };
+        if (beta != 1.f) {
+            output[index] = {
+                __float2half(val.x / (1.f + __expf(beta * -val.x))) * gate_val.x,
+                __float2half(val.y / (1.f + __expf(beta * -val.y))) * gate_val.y,
+            };
+        }
+        else {
+            output[index] = {
+                __float2half(val.x / (1.f + __expf(-val.x))) * gate_val.x,
+                __float2half(val.y / (1.f + __expf(-val.y))) * gate_val.y,
+            };
+        }
     } else {
-        output[index] = {
-            __float2half(val.x / (1.f + __expf(-val.x))),
-            __float2half(val.y / (1.f + __expf(-val.y)))
-        };
+        if (beta != 1.f) {
+            output[index] = {
+                __float2half(val.x / (1.f + __expf(beta * -val.x))),
+                __float2half(val.y / (1.f + __expf(beta * -val.y)))
+            };
+        }
+        else {
+            output[index] = {
+                __float2half(val.x / (1.f + __expf(-val.x))),
+                __float2half(val.y / (1.f + __expf(-val.y)))
+            };
+        }
     }
 }
 
@@ -76,6 +104,7 @@ ppl::common::RetCode silu(
     const ppl::common::TensorShape* input_shape,
     const void* input,
     const void* optional_gate,
+    const float beta,
     void* output)
 {
     if (input_shape->GetDataType() != ppl::common::DATATYPE_FLOAT16) {
@@ -90,19 +119,19 @@ ppl::common::RetCode silu(
         const int64_t BPG = (num_elem + TPB - 1) / TPB;
         if (optional_gate) {
             silu_kernel_fp16<true><<<BPG, TPB, 0, stream>>>(
-                (const half*)input, (const half*)optional_gate, num_elem, (half*)output);
+                (const half*)input, (const half*)optional_gate, beta, num_elem, (half*)output);
         } else {
             silu_kernel_fp16<false><<<BPG, TPB, 0, stream>>>(
-                (const half*)input, (const half*)optional_gate, num_elem, (half*)output);
+                (const half*)input, (const half*)optional_gate, beta, num_elem, (half*)output);
         }
     } else {
         const int64_t BPG = ((num_elem >> 1) + TPB - 1) / TPB;
         if (optional_gate) {
             silu_kernel_packed_fp16<true><<<BPG, TPB, 0, stream>>>(
-                (const half2*)input, (const half2*)optional_gate, num_elem >> 1, (half2*)output);
+                (const half2*)input, (const half2*)optional_gate, beta, num_elem >> 1, (half2*)output);
         } else {
             silu_kernel_packed_fp16<false><<<BPG, TPB, 0, stream>>>(
-                (const half2*)input, (const half2*)optional_gate, num_elem >> 1, (half2*)output);
+                (const half2*)input, (const half2*)optional_gate, beta, num_elem >> 1, (half2*)output);
         }
     }
 
