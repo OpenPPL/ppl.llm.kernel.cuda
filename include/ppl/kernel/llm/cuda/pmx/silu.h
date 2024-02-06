@@ -27,6 +27,7 @@ ppl::common::RetCode silu(
     const ppl::common::TensorShape* input_shape,
     const void* input,
     const void* optional_gate,
+    const float beta,
     void* output);
 
 }}}}}
