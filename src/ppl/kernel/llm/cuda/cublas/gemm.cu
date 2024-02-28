@@ -245,7 +245,7 @@ ppl::common::RetCode gemm_i8i8i32(
     // find algo online
     cublasLtMatmulAlgo_t algo_value;
     bool                 found_algo = false;
-    if (algo == nullptr) {
+    if (algo == nullptr && algo_cache != nullptr) {
         // create matrix descriptors for algo select, align MNK to power of 2
         int64_t M_shift = 0;
         int64_t M_aligned = M;
