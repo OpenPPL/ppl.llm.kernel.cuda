@@ -173,7 +173,7 @@ float attn_thread_group_reduce_sum(float qk)
     return qk;
 }
 
-template<int32_t WPT>
+template<int32_t WPT, int32_t STOP_MASK>
 __device__ inline
 float attn_block_reduce_max(float reducing, float* shared_mem)
 {
@@ -183,7 +183,7 @@ float attn_block_reduce_max(float reducing, float* shared_mem)
     const int32_t warp_id = threadIdx.x / WARP_SIZE;
 
 # pragma unroll
-    for (int32_t mask = WARP_SIZE / 2; mask >= 1; mask /= 2) {
+    for (int32_t mask = WARP_SIZE / 2; mask >= STOP_MASK; mask /= 2) {
         reducing = fmaxf(reducing, __shfl_xor_sync(uint32_t(-1), reducing, mask));
     }
 
@@ -204,7 +204,7 @@ float attn_block_reduce_max(float reducing, float* shared_mem)
     return reducing;
 }
 
-template<int32_t WPT>
+template<int32_t WPT, int32_t STOP_MASK>
 __device__ inline
 float attn_block_reduce_sum(float reducing, float *shared_mem)
 {
@@ -214,7 +214,7 @@ float attn_block_reduce_sum(float reducing, float *shared_mem)
     const int32_t warp_id = threadIdx.x / WARP_SIZE;
 
 # pragma unroll
-    for (int32_t mask = WARP_SIZE / 2; mask >= 1; mask /= 2) {
+    for (int32_t mask = WARP_SIZE / 2; mask >= STOP_MASK; mask /= 2) {
         reducing += __shfl_xor_sync(uint32_t(-1), reducing, mask);
     }
 
@@ -404,7 +404,7 @@ void dynamic_batching_decoding_cache_sharemem_attention_fp16_kernel(dynamic_batc
     __shared__ float red_smem[WPT];
 
     // reduce partial_qk_max in thread block and boardcast
-    partial_qk_max = attn_block_reduce_max<WPT>(partial_qk_max, red_smem);
+    partial_qk_max = attn_block_reduce_max<WPT, 1>(partial_qk_max, red_smem);
 
     // Softmax Kernel Logic Start here
     float partial_exp_sum = 0.0f;
@@ -417,7 +417,7 @@ void dynamic_batching_decoding_cache_sharemem_attention_fp16_kernel(dynamic_batc
     // block reduce sum on partial_exp_sum
     // Warp per thread block must be power-of-2 for reducation, check attn_block_reduce_sum kernel.
     static_assert(WPT == 2 || WPT == 4 || WPT == 8 || WPT == 16 || WPT == 32 || WPT == 64);
-    partial_exp_sum = attn_block_reduce_sum<WPT>(partial_exp_sum, red_smem);
+    partial_exp_sum = attn_block_reduce_sum<WPT, 1>(partial_exp_sum, red_smem);
 
     if (MULTI_BLOCK > 1 && threadIdx.x == 0) {
         p.multi_block.log_sum_exp[
@@ -747,7 +747,7 @@ void dynamic_batching_decoding_cache_infinity_attention_fp16_kernel(dynamic_batc
     const int64_t block_context_beg     = block_idx * context_len_per_block;
     const int64_t block_context_len     = context_len >= context_len_per_block * (block_idx + 1) ? context_len_per_block : context_len - block_context_beg;
 
-    extern __shared__ float logits[];
+    __shared__ float tmp_buffer[WPT * HEAD_SIZE];
     float thread_qk_max = -FLT_MAX;
     float partial_exp_sum = 0.0f;
 
@@ -837,43 +837,42 @@ void dynamic_batching_decoding_cache_infinity_attention_fp16_kernel(dynamic_batc
             if (ATTN_MASK) {
                 qk_dot += __half2float(attn_mask[block_context_id]);
             }
+            // Computing inside performs better since using one fma per iteration
             if (qk_dot > thread_qk_max) {
-                float logic_scale = exp(thread_qk_max - qk_dot);
+                float logit_scale = exp(thread_qk_max - qk_dot);
                 thread_qk_max = qk_dot;
-                partial_exp_sum = partial_exp_sum * logic_scale + 1.f;
+                partial_exp_sum = partial_exp_sum * logit_scale + 1.f;
                 #pragma unroll
                 for(int32_t i = 0; i < VEC_SIZE * VEC_LEN; i++) {
-                    local_v[i] = local_v[i] * logic_scale + local_v_new[i];
+                    local_v[i] = local_v[i] * logit_scale + local_v_new[i];
                 }
             } else {
-                float exp_logic = exp(qk_dot - thread_qk_max);
-                partial_exp_sum += exp_logic;
+                float logit_scale = exp(qk_dot - thread_qk_max);
+                partial_exp_sum += logit_scale;
                 #pragma unroll
                 for(int32_t i = 0; i < VEC_SIZE * VEC_LEN; i++) {
-                    local_v[i] = local_v[i] + local_v_new[i] * exp_logic;
+                    local_v[i] = local_v[i] + local_v_new[i] * logit_scale;
                 }
             }
         }
     }
 
-    __shared__ float red_smem[WPT];
-
     // reduce partial_qk_max in thread block and boardcast
-    float partial_qk_max = attn_block_reduce_max<WPT>(thread_qk_max, red_smem);
+    float partial_qk_max = attn_block_reduce_max<WPT, THREAD_GROUP_SIZE>(thread_qk_max, tmp_buffer);
 
     if (partial_qk_max > thread_qk_max) {
-        float logic_scale = exp(thread_qk_max - partial_qk_max);
-        partial_exp_sum *= logic_scale;
+        float logit_scale = exp(thread_qk_max - partial_qk_max);
+        partial_exp_sum *= logit_scale;
         #pragma unroll
         for(int32_t i = 0; i < VEC_SIZE * VEC_LEN; i++) {
-            local_v[i] *= logic_scale;
+            local_v[i] *= logit_scale;
         }
     }
 
     // block reduce sum on partial_exp_sum
     // Warp per thread block must be power-of-2 for reducation, check attn_block_reduce_sum kernel.
     static_assert(WPT == 2 || WPT == 4 || WPT == 8 || WPT == 16 || WPT == 32 || WPT == 64);
-    partial_exp_sum = attn_block_reduce_sum<WPT>(partial_exp_sum, red_smem) / THREAD_GROUP_SIZE;
+    partial_exp_sum = attn_block_reduce_sum<WPT, THREAD_GROUP_SIZE>(partial_exp_sum, &tmp_buffer[WPT]);
 
     if (MULTI_BLOCK > 1 && threadIdx.x == 0) {
         p.multi_block.log_sum_exp[
@@ -898,9 +897,8 @@ void dynamic_batching_decoding_cache_infinity_attention_fp16_kernel(dynamic_batc
     // wait for logits to be reused
     __syncthreads();
 
-    constexpr int64_t WORK_THREAD = WPT * THREAD_GROUP_SIZE * VEC_LEN;
-    constexpr int64_t WORK_WARP = (WORK_THREAD + WARP_SIZE - 1) / WARP_SIZE;
-    constexpr int64_t VPT = 16;
+    constexpr int64_t WORK_WARP = (WPT * THREAD_GROUP_SIZE * VEC_LEN + WARP_SIZE - 1) / WARP_SIZE;
+    constexpr int64_t VPT   = 16;
     constexpr int64_t V32PT = 16 / sizeof(float);
 
     const int32_t v_warp_id  = threadIdx.x % WPT;
@@ -915,7 +913,7 @@ void dynamic_batching_decoding_cache_infinity_attention_fp16_kernel(dynamic_batc
         for (int32_t i = 0; i < VEC_LEN * VEC_SIZE; i += V32PT) {
             copy<VPT>(
                 &local_v[i],
-                &logits[
+                &tmp_buffer[
                     i * WPT * THREAD_GROUP_SIZE +
                     warp_lane_id * WPT * V32PT +
                     ((warp_id + warp_lane_id) % WPT) * V32PT]);
@@ -926,21 +924,15 @@ void dynamic_batching_decoding_cache_infinity_attention_fp16_kernel(dynamic_batc
 
     // WPT reduce
     if (warp_id < WORK_WARP) {
-        if (threadIdx.x < WORK_THREAD) {
-            #pragma unroll
-            for (int32_t i = 0; i < VEC_SIZE; i+= V32PT) {
-                copy<VPT>(
-                    &logits[
-                        v_vec_id * VEC_SIZE * WPT * THREAD_GROUP_SIZE +
-                        i * WPT * THREAD_GROUP_SIZE +
-                        v_group_id * WPT * V32PT +
-                        ((v_warp_id + v_group_id) % WPT) * V32PT],
-                    &local_v[i]);
-            }
-        } else {
-            for (int32_t i = 0; i < VEC_SIZE * VEC_LEN; i+= 1) {
-                local_v[i] = 0.f;
-            }
+        #pragma unroll
+        for (int32_t i = 0; i < VEC_SIZE; i+= V32PT) {
+            copy<VPT>(
+                &tmp_buffer[
+                    v_vec_id * VEC_SIZE * WPT * THREAD_GROUP_SIZE +
+                    i * WPT * THREAD_GROUP_SIZE +
+                    v_group_id * WPT * V32PT +
+                    ((v_warp_id + v_group_id) % WPT) * V32PT],
+                &local_v[i]);
         }
         #pragma unroll
         for (int32_t i = 0; i < VEC_SIZE; i++) {
@@ -1000,10 +992,9 @@ void dynamic_batching_decoding_cache_infinity_attention_fp16_kernel(dynamic_batc
             }
             scale_sum = __shfl_sync(uint32_t(-1), scale_sum, 0);
 
-            float *scale_smem = logits;
             int scale_id = warp_id * MULTI_BLOCK + warp_lane_id;
             if (warp_lane_id < MULTI_BLOCK && scale_id < WARP_SIZE) {
-                scale_smem[scale_id] = local_scale / scale_sum;
+                tmp_buffer[scale_id] = local_scale / scale_sum;
             }
             __syncthreads();
 
@@ -1012,7 +1003,7 @@ void dynamic_batching_decoding_cache_infinity_attention_fp16_kernel(dynamic_batc
 
             for (int64_t head_dim_idx = head_dim_idx_base; head_dim_idx < HEAD_SIZE; head_dim_idx += head_dim_idx_stride) {
                 half final_out[VEC_SIZE];
-                local_scale = scale_smem[warp_lane_id];
+                local_scale = tmp_buffer[warp_lane_id];
                 copy<VEC_SIZE*sizeof(half)>(
                     &p.multi_block.partial_out[
                         batch_size * HEAD_SIZE * MULTI_BLOCK * head_idx +
@@ -1043,6 +1034,7 @@ void dynamic_batching_decoding_cache_infinity_attention_fp16_kernel(dynamic_batc
         }
     }
 }
+
 
 std::pair<ppl::common::RetCode, dynamic_batching_multi_head_cache_attention_config>
 dynamic_batching_multi_head_cache_attention_prepare(
@@ -1109,6 +1101,7 @@ dynamic_batching_multi_head_cache_attention_prepare(
         return {ppl::common::RC_UNSUPPORTED, config};
     }
 
+    constexpr int64_t WARP_SIZE = 32;
     constexpr int64_t TPB = 256;
     constexpr int64_t VPT = 8;
 
@@ -1197,7 +1190,6 @@ dynamic_batching_multi_head_cache_attention_prepare(
     bool use_infinity_mhca = false;
     int64_t decoding_shm_size = 0;
     if (decoding_batches > 0) {
-        constexpr int64_t WARP_SIZE = 32;
         const int64_t WPT = decoding_threads_per_block / WARP_SIZE;
         const int64_t reduce_shm_size = decoding_threads_per_block / WARP_SIZE * sizeof(float);
         const int64_t max_multi_block_kvlen = (max_kvlen * sizeof(float) + decoding_multi_block_size - 1) / decoding_multi_block_size;
@@ -1207,11 +1199,9 @@ dynamic_batching_multi_head_cache_attention_prepare(
     }
 
     if (use_infinity_mhca) {
-        constexpr int64_t WARP_SIZE = 32;
-        const int64_t WPT = decoding_threads_per_block / WARP_SIZE;
-        const int64_t reduce_shm_size = decoding_threads_per_block / WARP_SIZE * sizeof(float);
-        const int64_t logits_size = WPT * head_dim * sizeof(float);
-        decoding_shm_size = reduce_shm_size + logits_size;
+        // TODO(FIXME): may get wrong result when TPB = 1024 or 512
+        decoding_threads_per_block = 256;
+        decoding_shm_size = 0;
     }
 
     config.device_prop = const_cast<cudaDeviceProp*>(&device_prop);
