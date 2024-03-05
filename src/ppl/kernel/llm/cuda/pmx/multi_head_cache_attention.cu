@@ -1478,7 +1478,7 @@ ppl::common::RetCode dynamic_batching_multi_head_cache_attention(
     }
 
     if (cfg.prefill_batches > 0) {
-        const int64_t custom_mask_type = cfg.is_causal ? 1 : 0;
+        const int64_t custom_mask_type = cfg.is_causal ? 2 : 0;
         const void* prefill_seqstart_q = ((int64_t*)cfg.seqstarts) + cfg.decoding_batches;
 
         return llm::cuda::xformer::fmha(
