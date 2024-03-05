@@ -93,11 +93,11 @@ dynamic_batching_multi_head_cache_attention_prepare(
     const cudaStream_t stream,
     const cudaDeviceProp& device_prop,
     const ppl::common::TensorShape* query_shape,
-    const void* query, // (S, ..., D)
+    const void* query, // (Sq, ..., D)
     const ppl::common::TensorShape* current_key_shape,
-    const void* current_key, // (S, ..., D)
+    const void* current_key, // (Skv, ..., D)
     const ppl::common::TensorShape* current_value_shape,
-    const void* current_value, // (S, ..., D)
+    const void* current_value, // (Skv, ..., D)
     const ppl::common::TensorShape* attn_mask_shape,
     const void* attn_mask, // (seqstarts[-1], aligned(kvstarts[-1], 8)), (num_heads, seqstarts[-1], aligned(kvstarts[-1], 8))
     const void* seqstarts, // (B + 1)

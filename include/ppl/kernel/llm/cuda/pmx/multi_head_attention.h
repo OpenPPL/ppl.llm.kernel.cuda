@@ -40,6 +40,30 @@ ppl::common::RetCode multi_head_attention(
     const ppl::common::TensorShape* output_shape,
     void* output); // (B, Sq, Hq ,D)
 
+ppl::common::RetCode dynamic_batching_multi_head_attention(
+    const cudaStream_t stream,
+    const cudaDeviceProp& device_prop,
+    const ppl::common::TensorShape* query_shape,
+    const void* query, // (Sq, ..., D)
+    const ppl::common::TensorShape* key_shape,
+    const void* key, // (Skv, ..., D)
+    const ppl::common::TensorShape* value_shape,
+    const void* value, // (Skv, ..., D)
+    const ppl::common::TensorShape* attn_mask_shape,
+    const void* attn_mask, // (seqstarts[-1], aligned(kvstarts[-1], 8)), (num_heads, seqstarts[-1], aligned(kvstarts[-1], 8))
+    const void* seqstarts, // (B + 1)
+    const void* kvstarts, // (B + 1)
+    const bool is_causal,
+    const int64_t batch,
+    const int64_t decoding_batches,
+    const int64_t max_seqlen,
+    const int64_t max_kvlen,
+    const int64_t num_heads,
+    const int64_t num_kv_heads,
+    const int64_t head_dim,
+    const ppl::common::TensorShape* output_shape,
+    void* output); // (Sq, ..., D)
+
 }}}}}
 
 #endif
