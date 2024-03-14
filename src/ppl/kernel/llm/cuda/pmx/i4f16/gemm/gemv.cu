@@ -244,9 +244,11 @@ __global__ __launch_bounds__(Threads) void gemv_bias(const void* __restrict__ A,
     for (int b = 0; b < kBatch; b++) {
         c_ptr[b] = reinterpret_cast<half*>(C) + b * N * 4 + c_offset;
         c_ptr_f4[b] = reinterpret_cast<float2*>(c_ptr[b]);
-        bs_ptr[b] = reinterpret_cast<const half*>(BS) + b * N * 4 + c_offset;
-        bs_ptr_f4[b] = reinterpret_cast<const float2*>(bs_ptr[b]);
+        // bs_ptr[b] = reinterpret_cast<const half*>(BS) + b * N * 4 + c_offset;
+        // bs_ptr_f4[b] = reinterpret_cast<const float2*>(bs_ptr[b]);
     }
+    bs_ptr[0] = reinterpret_cast<const half*>(BS) + 0 * N * 4 + c_offset;
+    bs_ptr_f4[0] = reinterpret_cast<const float2*>(bs_ptr[0]);
 
     const int thread_x = threadIdx.x % TBatch;
     const int thread_y = threadIdx.x / TBatch;
@@ -277,10 +279,11 @@ __global__ __launch_bounds__(Threads) void gemv_bias(const void* __restrict__ A,
     compute<kThreads, kTBatch, kAccessBatch, kBatch>(ptr_b, ptr_a, ptr_s, N, K, accum_c, iter_nums, block_idx);
 
     if (is_write_thread && c_offset < N * 4) {
-#pragma unroll
-        for (int b = 0; b < kBatch; b++) {
-            bias[b] = *(bs_ptr_f4[b]);
-        }
+// #pragma unroll
+//         for (int b = 0; b < kBatch; b++) {
+//             bias[b] = *(bs_ptr_f4[b]);
+//         }
+        bias[0] = *(bs_ptr_f4[0]);
     }
 
     __shared__ float smem[kThreads];
@@ -301,10 +304,11 @@ __global__ __launch_bounds__(Threads) void gemv_bias(const void* __restrict__ A,
             accum_pack[b] = reinterpret_cast<float2*>(accum_c[b]);
         }
 
+        const half2* bs_h = reinterpret_cast<const half2*>(&bias[0]);
 #pragma unroll
         for (int b = 0; b < kBatch; b++) {
             half2* accum_h = reinterpret_cast<half2*>(accum_pack[b]);
-            const half2* bs_h = reinterpret_cast<const half2*>(&bias[b]);
+            // const half2* bs_h = reinterpret_cast<const half2*>(&bias[b]);
 #pragma unroll
             for (int it = 0; it < 2; it++) {
                 accum_h[it] = __hadd2(bs_h[it], accum_h[it]);
