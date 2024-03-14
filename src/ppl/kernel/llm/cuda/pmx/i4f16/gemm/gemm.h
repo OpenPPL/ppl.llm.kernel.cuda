@@ -384,7 +384,7 @@ struct Gemm {
 
     __device__ void loadb(const void* bias, uint32_t m, uint32_t n, uint32_t M, uint32_t N, uint4& data) {
         const float4* bias_f4 = reinterpret_cast<const float4*>(bias);
-        const uint64_t idx = m * N + n;
+        const uint64_t idx = 0 * N + n;
         const void* addr = (const void*)(&bias_f4[idx / 2]);
         loadg(data.x, data.y, data.z, data.w, addr, (n < N && m < M));
     }
