@@ -50,7 +50,7 @@ ppl::common::RetCode dynamic_batching_position_index(
 
     const dim3 grid_size = {
         (unsigned int)((max_seqlen + TPB - 1) / TPB * TPB),
-        batch,
+        (unsigned int)batch,
         1,
     };
 
