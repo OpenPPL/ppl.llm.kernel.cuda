@@ -19,6 +19,7 @@
 #include "ppl/common/log.h"
 
 #include "ppl/kernel/llm/cuda/xformer/fmha.h"
+#include "ppl/kernel/llm/cuda/flash_attn2/fmha.h"
 #include "cudakernel/common/common.cuh"
 
 #include <cuda_fp16.h>
@@ -1478,10 +1479,9 @@ ppl::common::RetCode dynamic_batching_multi_head_cache_attention(
     }
 
     if (cfg.prefill_batches > 0) {
-        const int64_t custom_mask_type = cfg.is_causal ? 2 : 0;
         const void* prefill_seqstart_q = ((int64_t*)cfg.seqstarts) + cfg.decoding_batches;
 
-        return llm::cuda::xformer::fmha(
+        return llm::cuda::flash_attn2::flash_attn2_fmha(
             stream,
             *cfg.device_prop,
             cfg.query_shape->GetDataType(),
@@ -1491,18 +1491,20 @@ ppl::common::RetCode dynamic_batching_multi_head_cache_attention(
             cfg.attn_mask,
             prefill_seqstart_q,
             prefill_seqstart_q,
+            nullptr,
             cfg.prefill_batches,
             0, cfg.q_stride_s, cfg.head_dim,
             0, cfg.k_stride_s, cfg.head_dim,
             0, cfg.v_stride_s, cfg.head_dim,
             0, cfg.mask_stride_s, cfg.mask_stride_h,
             cfg.o_stride_s,
+            0,
             cfg.max_seqlen,
             cfg.max_kvlen,
             cfg.num_heads,
             cfg.num_kv_heads,
             cfg.head_dim,
-            custom_mask_type,
+            cfg.is_causal,
             cfg.attn_scale,
             cfg.output
         );
