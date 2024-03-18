@@ -194,7 +194,8 @@ inline __device__ void apply_bias(
     const int max_seqlen_k,
     const int row_idx_offset,
     const int max_seqlen_q,
-    const int warp_row_stride)
+    const int warp_row_stride,
+    const float scale_softmax_rcp)
 {
     // tensor has shape (ncol=(2, MMA_M), nrow=(2, MMA_N))
     static_assert(ScoreLayout::rank == 2 && BiasLayout::rank == 2, "Only support 2D Tensor");
@@ -215,7 +216,7 @@ inline __device__ void apply_bias(
                     const int col_idx = col_idx_base + j;
                     // score is usally with dtype fp32, bias is fp16?
                     //
-                    score(make_coord(i, mi), make_coord(j, nj)) += bias(row_idx, col_idx);
+                    score(make_coord(i, mi), make_coord(j, nj)) += bias(row_idx, col_idx) * scale_softmax_rcp;
                 }
             }
         }

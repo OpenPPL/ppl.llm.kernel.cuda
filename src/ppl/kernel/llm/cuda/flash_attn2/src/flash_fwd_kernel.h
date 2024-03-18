@@ -328,7 +328,8 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
 
     clear(acc_o);
 
-    float alibi_slope = !Has_alibi ? 0.0f : reinterpret_cast<float *>(params.alibi_slopes_ptr)[bidb * params.alibi_slopes_batch_stride + bidh] / params.scale_softmax;
+    const float alibi_slope = !Has_alibi ? 0.0f : reinterpret_cast<float *>(params.alibi_slopes_ptr)[bidb * params.alibi_slopes_batch_stride + bidh] / params.scale_softmax;
+    const float scale_softmax_rcp = Has_bias ? 1.0f / params.scale_softmax : 0.0f;
 
     // For performance reason, we separate out two kinds of iterations:
     // those that need masking on S, and those that don't.
@@ -391,7 +392,8 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
                 binfo.actual_seqlen_k,
                 m_block * kBlockM + (tidx / 32) * 16 + (tidx % 32) / 4,
                 binfo.actual_seqlen_q,
-                kNWarps * 16);
+                kNWarps * 16,
+                scale_softmax_rcp);
         }
 
         if (!Is_causal && !Is_local) {
@@ -433,8 +435,8 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
 
         // TODO: when we have key_padding_mask we'll need to Check_inf
         masking_step == 0
-            ? softmax_rescale_o</*Is_first=*/true,  /*Check_inf=*/Is_causal || Is_local>(scores, scores_max, scores_sum, acc_o, params.scale_softmax_log2)
-            : softmax_rescale_o</*Is_first=*/false, /*Check_inf=*/Is_causal || Is_local>(scores, scores_max, scores_sum, acc_o, params.scale_softmax_log2);
+            ? softmax_rescale_o</*Is_first=*/true,  /*Check_inf=*/Is_causal || Is_local || Has_bias>(scores, scores_max, scores_sum, acc_o, params.scale_softmax_log2)
+            : softmax_rescale_o</*Is_first=*/false, /*Check_inf=*/Is_causal || Is_local || Has_bias>(scores, scores_max, scores_sum, acc_o, params.scale_softmax_log2);
 
         // Convert scores from fp32 to fp16/bf16
         Tensor rP = flash::convert_type<Element>(scores);
@@ -517,7 +519,8 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
                 binfo.actual_seqlen_k,
                 m_block * kBlockM + (tidx / 32) * 16 + (tidx % 32) / 4,
                 binfo.actual_seqlen_q,
-                kNWarps * 16);
+                kNWarps * 16,
+                scale_softmax_rcp);
         }
 
         if (Is_local && n_block * kBlockN < (m_block + 1) * kBlockM + binfo.actual_seqlen_k - binfo.actual_seqlen_q + params.window_size_right) {
@@ -529,7 +532,7 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
             );
         }
 
-        softmax_rescale_o</*Is_first=*/false, /*Check_inf=*/Is_local>(scores, scores_max, scores_sum, acc_o, params.scale_softmax_log2);
+        softmax_rescale_o</*Is_first=*/false, /*Check_inf=*/Is_local || Has_bias>(scores, scores_max, scores_sum, acc_o, params.scale_softmax_log2);
 
         Tensor rP = flash::convert_type<Element>(scores);
         // Reshape rP from (nrow=(2, MMA_M), ncol=(2, MMA_N)) to ((2, 2, 2), MMA_M, MMA_N / 2)
