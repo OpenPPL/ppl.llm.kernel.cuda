@@ -29,6 +29,34 @@ static constexpr __device__ half HALF_MAX() {
     return *((half*)(&a)); 
 }
 
+moe_select_config moe_select_prepare(
+    const ppl::common::TensorShape* invert_permutation_shape,
+    const int64_t num_experts) 
+{
+    const int64_t expand_tokens = invert_permutation_shape->CalcElementsExcludingPadding();
+
+    moe_select_config config;
+
+    void *d_temp_storage = nullptr;
+    int64_t* null_int = nullptr;
+    size_t temp_storage_bytes = 0;
+
+    ::cub::DeviceRadixSort::SortPairs(
+        d_temp_storage, temp_storage_bytes, null_int, null_int,
+        null_int, null_int, expand_tokens, 0, (int)(log2(num_experts)) + 1);
+
+    config.expert_ids_size = expand_tokens * sizeof(int64_t);
+    config.sorted_expert_ids_size = expand_tokens * sizeof(int64_t);
+    config.source_row_size = expand_tokens * sizeof(int64_t);
+    config.permute_token_idx_size = expand_tokens * sizeof(int64_t);
+    config.sort_buffer_size = temp_storage_bytes;
+
+    config.temp_buffer_size = config.expert_ids_size + config.sorted_expert_ids_size + config.source_row_size +
+                            config.permute_token_idx_size + config.sort_buffer_size;
+
+    return config;
+}
+
 template<int32_t NUM_EXPERTS, int32_t TPB, int32_t VPT>
 __global__ 
 void moe_topk_softmax_kernel(
@@ -37,7 +65,7 @@ void moe_topk_softmax_kernel(
     const int64_t top_k,
     half* expert_weights,   // [tokens, k] 
     int64_t* expert_ids,    // [tokens, k]
-    int64_t* permute_token_idx)   // [tokens, k]
+    int64_t* source_row)   // [tokens, k]
 {
     constexpr int32_t THREAD_GROUP_SIZE = NUM_EXPERTS * sizeof(half) / 16;
     const int32_t tid = blockIdx.x * TPB + threadIdx.x;
@@ -57,8 +85,8 @@ void moe_topk_softmax_kernel(
     __shared__ int32_t shared_idx[TPB * MAX_K];
     register half local_scores[VPT];
 
-    float *local_shm_max = shared_max + tid * top_k;
-    int32_t *local_shm_idx = shared_idx + tid * top_k;
+    float *local_shm_max = shared_max + threadIdx.x * MAX_K;
+    int32_t *local_shm_idx = shared_idx + threadIdx.x * MAX_K;
 
     copy<sizeof(half) * VPT>(scores + tid * VPT, local_scores);
 
@@ -122,7 +150,7 @@ void moe_topk_softmax_kernel(
         for (auto i = 0; i < top_k; i++) {
             expert_weights[group_id * top_k + i] = __float2half(local_shm_max[i] / softmax_sum);
             expert_ids[group_id * top_k + i] = local_shm_idx[i];
-            permute_token_idx[group_id * top_k + i] = group_id * top_k + i;
+            source_row[group_id * top_k + i] = group_id * top_k + i;
         }
     }
 }
@@ -136,7 +164,7 @@ void moe_topk_softmax_kernel_default(
     const int64_t k,
     half* expert_weights,   // [tokens, k] 
     int64_t* expert_ids,
-    int64_t* permute_token_idx) // [tokens, k]
+    int64_t* source_row) // [tokens, k]
 {
     
     const int32_t tid = blockIdx.x * TPB + threadIdx.x;
@@ -184,7 +212,7 @@ void moe_topk_softmax_kernel_default(
 
         for (int32_t i = 0; i < k; ++i) {
             expert_weights[offset * k + i] = __float2half(exp(local_output[i] - softmax_max) / softmax_sum);
-            permute_token_idx[offset * k + i] = offset * k + i;
+            source_row[offset * k + i] = offset * k + i;
         }
     }
 }
@@ -197,7 +225,7 @@ void moe_topk_softmax(
     const int64_t num_experts_per_token, 
     half* expert_weights, 
     int64_t* expert_ids, 
-    int64_t* permute_token_idx, 
+    int64_t* source_row,
     const cudaStream_t stream) 
 {
 
@@ -205,7 +233,7 @@ void moe_topk_softmax(
 
     constexpr int32_t TPB = 256;
     constexpr int32_t VPT = 16 / sizeof(half);
-    const int32_t BPG = (num_elem / VPT + TPB - 1) / TPB;
+    const int32_t BPG = (num_elem + TPB * VPT - 1) / (TPB * VPT);
 
     if (num_experts_per_token <= 8) {
         switch (num_experts) 
@@ -217,7 +245,7 @@ void moe_topk_softmax(
                     num_experts_per_token,
                     expert_weights, 
                     expert_ids,
-                    permute_token_idx);
+                    source_row);
                 break;
             case 16:
                 moe_topk_softmax_kernel<16, TPB, VPT><<<BPG, TPB, 0, stream>>>(
@@ -226,7 +254,7 @@ void moe_topk_softmax(
                     num_experts_per_token,
                     expert_weights, 
                     expert_ids,
-                    permute_token_idx);
+                    source_row);
                 break;
             case 32:
                 moe_topk_softmax_kernel<32, TPB, VPT><<<BPG, TPB, 0, stream>>>(
@@ -235,7 +263,7 @@ void moe_topk_softmax(
                     num_experts_per_token,
                     expert_weights, 
                     expert_ids,
-                    permute_token_idx);
+                    source_row);
                 break;
             case 64:
                 moe_topk_softmax_kernel<64, TPB, VPT><<<BPG, TPB, 0, stream>>>(
@@ -244,7 +272,7 @@ void moe_topk_softmax(
                     num_experts_per_token,
                     expert_weights, 
                     expert_ids,
-                    permute_token_idx);
+                    source_row);
                 break;
             default:
                 moe_topk_softmax_kernel_default<TPB><<<BPG, TPB, 0, stream>>>(
@@ -254,7 +282,7 @@ void moe_topk_softmax(
                     num_experts_per_token,
                     expert_weights, 
                     expert_ids,
-                    permute_token_idx);
+                    source_row);
         }
     } else {
         moe_topk_softmax_kernel_default<TPB><<<BPG, TPB, 0, stream>>>(
@@ -264,47 +292,25 @@ void moe_topk_softmax(
             num_experts_per_token,
             expert_weights, 
             expert_ids,
-            permute_token_idx);
+            source_row);
     }
 }
 
 void sort_pairs(
-    int64_t* key, 
-    int64_t* value, 
-    void* sort_buffer, 
-    const int32_t num_key_value_pairs, 
-    const int64_t sort_buffer_size, 
-    const int64_t num_experts, 
-    const cudaStream_t stream) 
+    int64_t* key_in,
+    int64_t* key_out,
+    int64_t* value_in,
+    int64_t* value_out,
+    void* sort_buffer,
+    const int32_t num_key_value_pairs,
+    const int64_t sort_buffer_size,
+    const int64_t num_experts,
+    const cudaStream_t stream)
 {
     size_t m_sort_buffer_size = sort_buffer_size;
     cub::DeviceRadixSort::SortPairs(
-        sort_buffer, m_sort_buffer_size, key, key, value, value,
+        sort_buffer, m_sort_buffer_size, key_in, key_out, value_in, value_out,
         num_key_value_pairs, 0, (int)(log2(num_experts)) + 1, stream);
-}
-
-moe_select_config moe_select_prepare(
-    const ppl::common::TensorShape* invert_permutation_shape, 
-    const int64_t num_experts) 
-{
-    const int64_t expand_tokens = invert_permutation_shape->CalcElementsExcludingPadding();
-
-    moe_select_config config;
-
-    void *d_temp_storage = nullptr;
-    int64_t* null_int = nullptr;
-    size_t temp_storage_bytes = 0;
-
-    ::cub::DeviceRadixSort::SortPairs(
-        d_temp_storage, temp_storage_bytes, null_int, null_int,
-        null_int, null_int, expand_tokens, 0, (int)(log2(num_experts)) + 1);
-
-    config.expert_ids_size = expand_tokens * sizeof(int64_t);
-    config.permute_token_idx_size = expand_tokens * sizeof(int64_t);
-    config.sort_buffer_size = temp_storage_bytes;
-    config.temp_buffer_size = config.expert_ids_size + config.permute_token_idx_size + config.sort_buffer_size;
-
-    return config;
 }
 
 __device__ 
@@ -429,22 +435,26 @@ ppl::common::RetCode moe_select(
     const int64_t dim = x_shape->GetDim(x_shape->GetDimCount() - 1);
 
     void* expert_ids = temp_buffer;
-    void* permute_token_idx = (void*)((char*)temp_buffer + config.expert_ids_size);
-    void* sort_buffer = (void*)((char*)temp_buffer + config.expert_ids_size + config.permute_token_idx_size);
+    void* sorted_expert_ids = (void*)((char*)temp_buffer + config.expert_ids_size);
+    void* source_row = (void*)((char*)temp_buffer + config.expert_ids_size + config.sorted_expert_ids_size);
+    void* permute_token_idx = (void*)((char*)temp_buffer + config.expert_ids_size +
+                                config.sorted_expert_ids_size + config.source_row_size);
+    void* sort_buffer = (void*)((char*)temp_buffer + config.expert_ids_size + config.sorted_expert_ids_size +
+                                config.source_row_size +  config.permute_token_idx_size);
 
     moe_topk_softmax(
         (const half*)scores, tokens, dim, num_experts,
         num_experts_per_token, (half*)expert_weights,
-        (int64_t*)expert_ids, (int64_t*)permute_token_idx, stream);
+        (int64_t*)expert_ids, (int64_t*)source_row, stream);
 
     const int32_t num_expand_tokens = tokens * num_experts_per_token;
 
     sort_pairs(
-        (int64_t*)expert_ids, (int64_t*)permute_token_idx, sort_buffer,
-        num_expand_tokens, config.sort_buffer_size, num_experts, stream);
+        (int64_t*)expert_ids, (int64_t*)sorted_expert_ids, (int64_t*)source_row, (int64_t*)permute_token_idx,
+        sort_buffer, num_expand_tokens, config.sort_buffer_size, num_experts, stream);
 
     compute_offset(
-        (const int64_t*)expert_ids, num_expand_tokens,
+        (const int64_t*)sorted_expert_ids, num_expand_tokens,
         num_experts, (int64_t*)expert_offset, stream);
 
     expand_permute(

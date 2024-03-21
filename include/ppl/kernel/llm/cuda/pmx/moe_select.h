@@ -23,7 +23,9 @@
 namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pmx {
 
 struct moe_select_config {
+    int64_t sorted_expert_ids_size;
     int64_t expert_ids_size;
+    int64_t source_row_size;
     int64_t permute_token_idx_size;
     int64_t sort_buffer_size;
     int64_t temp_buffer_size;
