@@ -38,6 +38,7 @@ struct dynamic_batching_multi_head_cache_attention_config {
     void* kvstarts;
     void* cachestarts;
     void* start_pos;
+    void* alibi_slopes;
     
     void* cache;
     void* scale;
@@ -56,10 +57,14 @@ struct dynamic_batching_multi_head_cache_attention_config {
     int64_t num_kv_heads;
     int64_t head_dim;
     int32_t cache_mode;
+    int32_t page_size;
+    int32_t page_shift;
+    int32_t page_mask;
     int64_t cache_stride_s;
     int64_t cache_stride_l;
     int64_t cache_stride_h;
     int64_t cache_stride_kv;
+    int64_t cachestarts_stride_b;
 
     // produce by prepare function
     int64_t prefill_batches;
@@ -104,6 +109,7 @@ dynamic_batching_multi_head_cache_attention_prepare(
     const void* kvstarts, // (B + 1)
     const void* cachestarts, // (B)
     const void* start_pos, // (B)
+    const void* alibi_slopes, // (num_head)
     const bool is_causal,
     const int64_t batch,
     const int64_t decoding_batches,
@@ -115,10 +121,12 @@ dynamic_batching_multi_head_cache_attention_prepare(
     const int64_t num_kv_heads,
     const int64_t head_dim,
     const int32_t cache_mode,
+    const int64_t page_size,
     const int64_t cache_stride_s,
     const int64_t cache_stride_l,
     const int64_t cache_stride_h,
     const int64_t cache_stride_kv,
+    const int64_t cachestarts_stride_b,
     void* cache, // int8 (S, L, 2, KVH, D), (L, KVH, S, 2, D)
     void* scale, // float16 (S, L, 2, KVH, D/8), (L, KVH, S, 2, D/8)
     const ppl::common::TensorShape* output_shape,

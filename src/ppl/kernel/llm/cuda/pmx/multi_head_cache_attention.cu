@@ -27,6 +27,8 @@
 
 namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pmx {
 
+static constexpr int32_t UNIFORM_PAGE_SIZE = 128;
+
 struct dynamic_batching_decoding_cache_attention_kernel_param {
     half* query;
     half* attn_mask;
@@ -38,6 +40,7 @@ struct dynamic_batching_decoding_cache_attention_kernel_param {
     float attn_scale;
     int64_t layer_idx;
     int64_t num_kv_repeats;
+    int64_t page_size;
     int64_t query_stride_s;
     int64_t output_stride_s;
     int64_t mask_stride_s;
@@ -46,6 +49,7 @@ struct dynamic_batching_decoding_cache_attention_kernel_param {
     int64_t cache_stride_l;
     int64_t cache_stride_h;
     int64_t cache_stride_kv;
+    int64_t cachestarts_stride_b;
 
     struct {
         int32_t* block_counter;
@@ -58,23 +62,25 @@ struct dynamic_batching_kv_cache_quantize_kernel_param {
     half* current_key; // (S, KVH..., D)
     half* current_value; // (S, KVH..., D)
     int64_t* seqstarts; // (B + 1)
-    int64_t* cachestarts;// (B)
+    int64_t* cachestarts;// (B) or (B, MaxP)
     int64_t* start_pos; // (B)
     int64_t num_layer;
     int64_t layer_idx;
     int64_t num_kv_heads;
     int64_t head_dim;
+    int32_t page_size;
     int64_t current_key_stride_s;
     int64_t current_value_stride_s;
     int64_t cache_stride_s;
     int64_t cache_stride_l;
     int64_t cache_stride_h;
     int64_t cache_stride_kv;
+    int64_t cachestarts_stride_b;
     int8_t* cache;
     half* scale;
 };
 
-template<int32_t VPT, int32_t TPB> // 8 fp16 occupy 128 bytes, which can be loaded by a single thread at once.
+template<int32_t VPT, int32_t TPB, int32_t PAGE_SIZE> // 8 fp16 occupy 128 bytes, which can be loaded by a single thread at once.
 __global__
 void dynamic_batching_kv_cache_quantize_kernel(dynamic_batching_kv_cache_quantize_kernel_param p)
 {
@@ -85,8 +91,11 @@ void dynamic_batching_kv_cache_quantize_kernel(dynamic_batching_kv_cache_quantiz
         const int64_t tid = blockIdx.z * TPB + threadIdx.x;
 
         if (tid < p.num_kv_heads * p.head_dim / VPT) {
+            const int64_t cache_token_idx = PAGE_SIZE <= 0
+                ? (p.cachestarts[batch_id] + seq_idx + p.start_pos[batch_id])
+                : (p.cachestarts[batch_id * p.cachestarts_stride_b + (seq_idx + p.start_pos[batch_id]) / PAGE_SIZE]
+                    + ((seq_idx + p.start_pos[batch_id]) % PAGE_SIZE));
             const int64_t input_token_idx = p.seqstarts[batch_id] + seq_idx;
-            const int64_t cache_token_idx = p.cachestarts[batch_id] + seq_idx + p.start_pos[batch_id];
             const int64_t key_out_offset = cache_token_idx * p.cache_stride_s + p.layer_idx * p.cache_stride_l;
             auto key_in_ptr = p.current_key + input_token_idx * p.current_key_stride_s;
             auto value_in_ptr = p.current_value + input_token_idx * p.current_value_stride_s;
@@ -239,7 +248,8 @@ template<
     int32_t TPB,
     int32_t QUANT_GROUP,
     int32_t MULTI_BLOCK,    // do flash decoding if more than 1
-    bool ATTN_MASK>
+    bool ATTN_MASK,
+    int32_t PAGE_SIZE>
 __global__
 void dynamic_batching_decoding_cache_sharemem_attention_fp16_kernel(dynamic_batching_decoding_cache_attention_kernel_param p)
 {
@@ -299,7 +309,7 @@ void dynamic_batching_decoding_cache_sharemem_attention_fp16_kernel(dynamic_batc
     const int64_t group_id      = warp_lane_id / THREAD_GROUP_SIZE;
     const int64_t group_lane_id = warp_lane_id % THREAD_GROUP_SIZE;
 
-    const int64_t cache_offset_s  = p.cachestarts[batch_idx];
+    const int64_t cache_offset_s  = PAGE_SIZE <= 0 ? p.cachestarts[batch_idx] : 0;
     const int32_t kv_head_idx     = head_idx / int32_t(p.num_kv_repeats);
 
     half *attn_mask = nullptr;
@@ -347,8 +357,12 @@ void dynamic_batching_decoding_cache_sharemem_attention_fp16_kernel(dynamic_batc
 
         // all thread groups within a warp must be launched together.
         if (block_context_id < block_context_len) {
+            const int64_t cache_token_idx = PAGE_SIZE <= 0
+                ? (cache_offset_s + block_context_beg + block_context_id)
+                : (p.cachestarts[batch_idx * p.cachestarts_stride_b + (block_context_beg + block_context_id) / PAGE_SIZE]
+                    + ((block_context_beg + block_context_id) % PAGE_SIZE));
             const int64_t key_offset
-                            = (cache_offset_s + block_context_beg + block_context_id) * p.cache_stride_s
+                            = cache_token_idx * p.cache_stride_s
                             + p.layer_idx * p.cache_stride_l
                             + p.cache_stride_h * kv_head_idx
                             + group_lane_id * VEC_SIZE;
@@ -444,8 +458,12 @@ void dynamic_batching_decoding_cache_sharemem_attention_fp16_kernel(dynamic_batc
         const int64_t block_context_id = base_id + group_id;
         // all thread groups within a warp must be launched together.
         if (block_context_id < block_context_len) {
+            const int64_t cache_token_idx = PAGE_SIZE <= 0
+                ? (cache_offset_s + block_context_beg + block_context_id)
+                : (p.cachestarts[batch_idx * p.cachestarts_stride_b + (block_context_beg + block_context_id) / PAGE_SIZE]
+                    + ((block_context_beg + block_context_id) % PAGE_SIZE));
             const int64_t value_offset
-                            = (cache_offset_s + block_context_beg + block_context_id) * p.cache_stride_s
+                            = cache_token_idx * p.cache_stride_s
                             + p.layer_idx * p.cache_stride_l
                             + p.cache_stride_h * kv_head_idx
                             + group_lane_id * VEC_SIZE
@@ -652,7 +670,8 @@ template<
     int32_t TPB,
     int32_t QUANT_GROUP,
     int32_t MULTI_BLOCK,    // do flash decoding if more than 1
-    bool ATTN_MASK>
+    bool ATTN_MASK,
+    int32_t PAGE_SIZE>
 __global__
 void dynamic_batching_decoding_cache_infinity_attention_fp16_kernel(dynamic_batching_decoding_cache_attention_kernel_param p)
 {
@@ -712,7 +731,7 @@ void dynamic_batching_decoding_cache_infinity_attention_fp16_kernel(dynamic_batc
     const int64_t group_id      = warp_lane_id / THREAD_GROUP_SIZE;
     const int64_t group_lane_id = warp_lane_id % THREAD_GROUP_SIZE;
 
-    const int64_t cache_offset_s  = p.cachestarts[batch_idx];
+    const int64_t cache_offset_s  = PAGE_SIZE <= 0 ? p.cachestarts[batch_idx] : 0;
     const int32_t kv_head_idx     = head_idx / p.num_kv_repeats;
 
     half *attn_mask = nullptr;
@@ -768,8 +787,12 @@ void dynamic_batching_decoding_cache_infinity_attention_fp16_kernel(dynamic_batc
 
         // all thread groups within a warp must be launched together.
         if (block_context_id < block_context_len) {
+            const int64_t cache_token_idx = PAGE_SIZE <= 0
+                ? (cache_offset_s + block_context_beg + block_context_id)
+                : (p.cachestarts[batch_idx * p.cachestarts_stride_b + (block_context_beg + block_context_id) / PAGE_SIZE]
+                    + ((block_context_beg + block_context_id) % PAGE_SIZE));
             const int64_t key_offset
-                            = (cache_offset_s + block_context_beg + block_context_id) * p.cache_stride_s
+                            = cache_token_idx * p.cache_stride_s
                             + p.layer_idx * p.cache_stride_l
                             + p.cache_stride_h * kv_head_idx
                             + group_lane_id * VEC_SIZE;
@@ -1042,17 +1065,18 @@ dynamic_batching_multi_head_cache_attention_prepare(
     const cudaStream_t stream,
     const cudaDeviceProp& device_prop,
     const ppl::common::TensorShape* query_shape,
-    const void* query, // (S, ..., D)
+    const void* query, // (Sq, ..., D)
     const ppl::common::TensorShape* current_key_shape,
-    const void* current_key, // (S, ..., D)
+    const void* current_key, // (Skv, ..., D)
     const ppl::common::TensorShape* current_value_shape,
-    const void* current_value, // (S, ..., D)
+    const void* current_value, // (Skv, ..., D)
     const ppl::common::TensorShape* attn_mask_shape,
-    const void* attn_mask, // (seqstarts[-1], kvstarts[-1]), (num_heads, seqstarts[-1], kvstarts[-1])
+    const void* attn_mask, // (seqstarts[-1], aligned(kvstarts[-1], 8)), (num_heads, seqstarts[-1], aligned(kvstarts[-1], 8))
     const void* seqstarts, // (B + 1)
     const void* kvstarts, // (B + 1)
     const void* cachestarts, // (B)
     const void* start_pos, // (B)
+    const void* alibi_slopes, // (num_head)
     const bool is_causal,
     const int64_t batch,
     const int64_t decoding_batches,
@@ -1064,10 +1088,12 @@ dynamic_batching_multi_head_cache_attention_prepare(
     const int64_t num_kv_heads,
     const int64_t head_dim,
     const int32_t cache_mode,
+    const int64_t page_size,
     const int64_t cache_stride_s,
     const int64_t cache_stride_l,
     const int64_t cache_stride_h,
     const int64_t cache_stride_kv,
+    const int64_t cachestarts_stride_b,
     void* cache, // int8 (S, L, 2, KVH, D), (L, KVH, S, 2, D)
     void* scale, // float16 (S, L, 2, KVH, D/8), (L, KVH, S, 2, D/8)
     const ppl::common::TensorShape* output_shape,
@@ -1097,9 +1123,11 @@ dynamic_batching_multi_head_cache_attention_prepare(
         return {ppl::common::RC_UNSUPPORTED, config};
     }
 
-    if (cache_mode != 0) {
-        LOG(ERROR) << "currently only support cache_mode == 0";
-        return {ppl::common::RC_UNSUPPORTED, config};
+    if (cache_mode == 1) {
+        if (page_size != UNIFORM_PAGE_SIZE) {
+            LOG(ERROR) << "currently only support page_size == UNIFORM_PAGE_SIZE";
+            return {ppl::common::RC_UNSUPPORTED, config};
+        }
     }
 
     constexpr int64_t WARP_SIZE = 32;
@@ -1156,19 +1184,20 @@ dynamic_batching_multi_head_cache_attention_prepare(
         decoding_multi_block_size == 1 &&
         decoding_batches > 0) {
         int32_t num_blocks_per_sm = -1;
-        auto kernel_fn = dynamic_batching_decoding_cache_sharemem_attention_fp16_kernel<64, 4, TPB, 8, 1, false>;
+        constexpr int32_t PAGE_SIZE = 0;
+        auto kernel_fn = dynamic_batching_decoding_cache_sharemem_attention_fp16_kernel<64, 4, TPB, 8, 1, false, PAGE_SIZE>;
         switch (head_dim) {
             case 64:
-                kernel_fn = dynamic_batching_decoding_cache_sharemem_attention_fp16_kernel<64, 4, TPB, 8, 1, false>;
+                kernel_fn = dynamic_batching_decoding_cache_sharemem_attention_fp16_kernel<64, 4, TPB, 8, 1, false, PAGE_SIZE>;
                 break;
             case 96:
-                kernel_fn = dynamic_batching_decoding_cache_sharemem_attention_fp16_kernel<96, 4, TPB, 8, 1, false>;
+                kernel_fn = dynamic_batching_decoding_cache_sharemem_attention_fp16_kernel<96, 4, TPB, 8, 1, false, PAGE_SIZE>;
                 break;
             case 128:
-                kernel_fn = dynamic_batching_decoding_cache_sharemem_attention_fp16_kernel<128, 8, TPB, 8, 1, false>;
+                kernel_fn = dynamic_batching_decoding_cache_sharemem_attention_fp16_kernel<128, 8, TPB, 8, 1, false, PAGE_SIZE>;
                 break;
             case 256:
-                kernel_fn = dynamic_batching_decoding_cache_sharemem_attention_fp16_kernel<256, 16, TPB, 8, 1, false>;
+                kernel_fn = dynamic_batching_decoding_cache_sharemem_attention_fp16_kernel<256, 16, TPB, 8, 1, false, PAGE_SIZE>;
                 break;
             default:
                 LOG(ERROR) << "cache flash decoding attention do not support head dim " << head_dim;
@@ -1219,6 +1248,7 @@ dynamic_batching_multi_head_cache_attention_prepare(
     config.kvstarts = const_cast<void*>(kvstarts);
     config.cachestarts = const_cast<void*>(cachestarts);
     config.start_pos = const_cast<void*>(start_pos);
+    config.alibi_slopes = const_cast<void*>(alibi_slopes);
 
     config.cache = cache;
     config.scale = scale;
@@ -1237,10 +1267,12 @@ dynamic_batching_multi_head_cache_attention_prepare(
     config.num_kv_heads = num_kv_heads;
     config.head_dim = head_dim;
     config.cache_mode = cache_mode;
+    config.page_size = page_size;
     config.cache_stride_s = cache_stride_s;
     config.cache_stride_l = cache_stride_l;
     config.cache_stride_h = cache_stride_h;
     config.cache_stride_kv = cache_stride_kv;
+    config.cachestarts_stride_b = cachestarts_stride_b;
 
     config.prefill_batches = prefill_batches;
     config.q_stride_s = q_stride_s;
@@ -1274,7 +1306,7 @@ dynamic_batching_multi_head_cache_attention_prepare(
 }
 
 
-template<int32_t TPB, bool ATTN_MASK, bool DO_MULTI_BLOCK>
+template<int32_t TPB, bool ATTN_MASK, bool DO_MULTI_BLOCK, int32_t PAGE_SIZE>
 ppl::common::RetCode dynamic_batching_decoding_cache_attention(
     const cudaStream_t stream,
     const dynamic_batching_multi_head_cache_attention_config &cfg,
@@ -1283,21 +1315,21 @@ ppl::common::RetCode dynamic_batching_decoding_cache_attention(
 {
     const int64_t RAW_SHM_SIZE = 48 * 1024;
 
-    auto kernel_fn = dynamic_batching_decoding_cache_infinity_attention_fp16_kernel<64, 4, TPB, 8, 1, ATTN_MASK>;
+    auto kernel_fn = dynamic_batching_decoding_cache_infinity_attention_fp16_kernel<64, 4, TPB, 8, 1, ATTN_MASK, PAGE_SIZE>;
     if (cfg.use_infinity_mhca) {
         if (DO_MULTI_BLOCK) {
             switch (cfg.head_dim) {
                 case 64:
-                    kernel_fn = dynamic_batching_decoding_cache_infinity_attention_fp16_kernel<64, 4, TPB, 8, 32, ATTN_MASK>;
+                    kernel_fn = dynamic_batching_decoding_cache_infinity_attention_fp16_kernel<64, 4, TPB, 8, 32, ATTN_MASK, PAGE_SIZE>;
                     break;
                 case 96:
-                    kernel_fn = dynamic_batching_decoding_cache_infinity_attention_fp16_kernel<96, 4, TPB, 8, 32, ATTN_MASK>;
+                    kernel_fn = dynamic_batching_decoding_cache_infinity_attention_fp16_kernel<96, 4, TPB, 8, 32, ATTN_MASK, PAGE_SIZE>;
                     break;
                 case 128:
-                    kernel_fn = dynamic_batching_decoding_cache_infinity_attention_fp16_kernel<128, 8, TPB, 8, 16, ATTN_MASK>;
+                    kernel_fn = dynamic_batching_decoding_cache_infinity_attention_fp16_kernel<128, 8, TPB, 8, 16, ATTN_MASK, PAGE_SIZE>;
                     break;
                 case 256:
-                    kernel_fn = dynamic_batching_decoding_cache_infinity_attention_fp16_kernel<256, 16, TPB, 8, 8, ATTN_MASK>;
+                    kernel_fn = dynamic_batching_decoding_cache_infinity_attention_fp16_kernel<256, 16, TPB, 8, 8, ATTN_MASK, PAGE_SIZE>;
                     break;
                 default:
                     LOG(ERROR) << "cache flash decoding attention do not support head dim " << cfg.head_dim;
@@ -1306,16 +1338,16 @@ ppl::common::RetCode dynamic_batching_decoding_cache_attention(
         } else {
             switch (cfg.head_dim) {
                 case 64:
-                    kernel_fn = dynamic_batching_decoding_cache_infinity_attention_fp16_kernel<64, 4, TPB, 8, 1, ATTN_MASK>;
+                    kernel_fn = dynamic_batching_decoding_cache_infinity_attention_fp16_kernel<64, 4, TPB, 8, 1, ATTN_MASK, PAGE_SIZE>;
                     break;
                 case 96:
-                    kernel_fn = dynamic_batching_decoding_cache_infinity_attention_fp16_kernel<96, 4, TPB, 8, 1, ATTN_MASK>;
+                    kernel_fn = dynamic_batching_decoding_cache_infinity_attention_fp16_kernel<96, 4, TPB, 8, 1, ATTN_MASK, PAGE_SIZE>;
                     break;
                 case 128:
-                    kernel_fn = dynamic_batching_decoding_cache_infinity_attention_fp16_kernel<128, 8, TPB, 8, 1, ATTN_MASK>;
+                    kernel_fn = dynamic_batching_decoding_cache_infinity_attention_fp16_kernel<128, 8, TPB, 8, 1, ATTN_MASK, PAGE_SIZE>;
                     break;
                 case 256:
-                    kernel_fn = dynamic_batching_decoding_cache_infinity_attention_fp16_kernel<256, 16, TPB, 8, 1, ATTN_MASK>;
+                    kernel_fn = dynamic_batching_decoding_cache_infinity_attention_fp16_kernel<256, 16, TPB, 8, 1, ATTN_MASK, PAGE_SIZE>;
                     break;
                 default:
                     LOG(ERROR) << "cache flash decoding attention do not support head dim " << cfg.head_dim;
@@ -1326,16 +1358,16 @@ ppl::common::RetCode dynamic_batching_decoding_cache_attention(
         if (DO_MULTI_BLOCK) {
             switch (cfg.head_dim) {
                 case 64:
-                    kernel_fn = dynamic_batching_decoding_cache_sharemem_attention_fp16_kernel<64, 4, TPB, 8, 32, ATTN_MASK>;
+                    kernel_fn = dynamic_batching_decoding_cache_sharemem_attention_fp16_kernel<64, 4, TPB, 8, 32, ATTN_MASK, PAGE_SIZE>;
                     break;
                 case 96:
-                    kernel_fn = dynamic_batching_decoding_cache_sharemem_attention_fp16_kernel<96, 4, TPB, 8, 32, ATTN_MASK>;
+                    kernel_fn = dynamic_batching_decoding_cache_sharemem_attention_fp16_kernel<96, 4, TPB, 8, 32, ATTN_MASK, PAGE_SIZE>;
                     break;
                 case 128:
-                    kernel_fn = dynamic_batching_decoding_cache_sharemem_attention_fp16_kernel<128, 8, TPB, 8, 16, ATTN_MASK>;
+                    kernel_fn = dynamic_batching_decoding_cache_sharemem_attention_fp16_kernel<128, 8, TPB, 8, 16, ATTN_MASK, PAGE_SIZE>;
                     break;
                 case 256:
-                    kernel_fn = dynamic_batching_decoding_cache_sharemem_attention_fp16_kernel<256, 16, TPB, 8, 8, ATTN_MASK>;
+                    kernel_fn = dynamic_batching_decoding_cache_sharemem_attention_fp16_kernel<256, 16, TPB, 8, 8, ATTN_MASK, PAGE_SIZE>;
                     break;
                 default:
                     LOG(ERROR) << "cache flash decoding attention do not support head dim " << cfg.head_dim;
@@ -1344,16 +1376,16 @@ ppl::common::RetCode dynamic_batching_decoding_cache_attention(
         } else {
             switch (cfg.head_dim) {
                 case 64:
-                    kernel_fn = dynamic_batching_decoding_cache_sharemem_attention_fp16_kernel<64, 4, TPB, 8, 1, ATTN_MASK>;
+                    kernel_fn = dynamic_batching_decoding_cache_sharemem_attention_fp16_kernel<64, 4, TPB, 8, 1, ATTN_MASK, PAGE_SIZE>;
                     break;
                 case 96:
-                    kernel_fn = dynamic_batching_decoding_cache_sharemem_attention_fp16_kernel<96, 4, TPB, 8, 1, ATTN_MASK>;
+                    kernel_fn = dynamic_batching_decoding_cache_sharemem_attention_fp16_kernel<96, 4, TPB, 8, 1, ATTN_MASK, PAGE_SIZE>;
                     break;
                 case 128:
-                    kernel_fn = dynamic_batching_decoding_cache_sharemem_attention_fp16_kernel<128, 8, TPB, 8, 1, ATTN_MASK>;
+                    kernel_fn = dynamic_batching_decoding_cache_sharemem_attention_fp16_kernel<128, 8, TPB, 8, 1, ATTN_MASK, PAGE_SIZE>;
                     break;
                 case 256:
-                    kernel_fn = dynamic_batching_decoding_cache_sharemem_attention_fp16_kernel<256, 16, TPB, 8, 1, ATTN_MASK>;
+                    kernel_fn = dynamic_batching_decoding_cache_sharemem_attention_fp16_kernel<256, 16, TPB, 8, 1, ATTN_MASK, PAGE_SIZE>;
                     break;
                 default:
                     LOG(ERROR) << "cache flash decoding attention do not support head dim " << cfg.head_dim;
@@ -1385,11 +1417,22 @@ ppl::common::RetCode dynamic_batching_decoding_cache_attention(
     const dynamic_batching_decoding_cache_attention_kernel_param &p
 )
 {
-    if (p.attn_mask) {
-        return dynamic_batching_decoding_cache_attention<TPB, true, DO_MULTI_BLOCK>(stream, cfg, p);
-    } else {
-        return dynamic_batching_decoding_cache_attention<TPB, false, DO_MULTI_BLOCK>(stream, cfg, p);
+    if (cfg.cache_mode == 1) {
+        if (p.attn_mask) {
+            return dynamic_batching_decoding_cache_attention<TPB, true, DO_MULTI_BLOCK, UNIFORM_PAGE_SIZE>(stream, cfg, p);
+        } else {
+            return dynamic_batching_decoding_cache_attention<TPB, false, DO_MULTI_BLOCK, UNIFORM_PAGE_SIZE>(stream, cfg, p);
+        }
     }
+    if (cfg.cache_mode == 0) {
+        if (p.attn_mask) {
+            return dynamic_batching_decoding_cache_attention<TPB, true, DO_MULTI_BLOCK, 0>(stream, cfg, p);
+        } else {
+            return dynamic_batching_decoding_cache_attention<TPB, false, DO_MULTI_BLOCK, 0>(stream, cfg, p);
+        }
+    }
+    LOG(ERROR) << "invalid cache_mode " << cfg.cache_mode;
+    return ppl::common::RC_UNSUPPORTED;
 }
 
 
@@ -1397,6 +1440,26 @@ ppl::common::RetCode dynamic_batching_multi_head_cache_attention(
     const cudaStream_t stream,
     const dynamic_batching_multi_head_cache_attention_config &cfg) // (S, .., D)
 {
+    struct dynamic_batching_kv_cache_quantize_kernel_param kv_store_p{0};
+    kv_store_p.current_key = (half*)cfg.current_key;
+    kv_store_p.current_value =  (half*)cfg.current_value;
+    kv_store_p.seqstarts = (int64_t*)cfg.seqstarts;
+    kv_store_p.cachestarts = (int64_t*)cfg.cachestarts;
+    kv_store_p.start_pos = (int64_t*)cfg.start_pos;
+    kv_store_p.num_layer = cfg.num_layer;
+    kv_store_p.layer_idx = cfg.layer_idx;
+    kv_store_p.num_kv_heads = cfg.num_kv_heads;
+    kv_store_p.head_dim = cfg.head_dim;
+    kv_store_p.page_size = cfg.page_size;
+    kv_store_p.current_key_stride_s = cfg.k_stride_s;
+    kv_store_p.current_value_stride_s = cfg.v_stride_s;
+    kv_store_p.cache_stride_s = cfg.cache_stride_s;
+    kv_store_p.cache_stride_l = cfg.cache_stride_l;
+    kv_store_p.cache_stride_h = cfg.cache_stride_h;
+    kv_store_p.cache_stride_kv = cfg.cache_stride_kv;
+    kv_store_p.cachestarts_stride_b = cfg.cachestarts_stride_b;
+    kv_store_p.cache = (int8_t*)cfg.cache;
+    kv_store_p.scale = (half*)cfg.scale;
     {
         constexpr int64_t TPB = 256;
         constexpr int64_t VPT = 8;
@@ -1407,66 +1470,57 @@ ppl::common::RetCode dynamic_batching_multi_head_cache_attention(
         }
 
         dim3 grid(cfg.max_seqlen, cfg.batch, (cfg.num_kv_heads * cfg.head_dim / VPT + TPB - 1) / TPB);
-        dynamic_batching_kv_cache_quantize_kernel<VPT, TPB><<<grid, TPB, 0, stream>>>(
-            {(half*)cfg.current_key,
-            (half*)cfg.current_value,
-            (int64_t*)cfg.seqstarts,
-            (int64_t*)cfg.cachestarts,
-            (int64_t*)cfg.start_pos,
-            cfg.num_layer,
-            cfg.layer_idx,
-            cfg.num_kv_heads,
-            cfg.head_dim,
-            cfg.k_stride_s,
-            cfg.v_stride_s,
-            cfg.cache_stride_s,
-            cfg.cache_stride_l,
-            cfg.cache_stride_h,
-            cfg.cache_stride_kv,
-            (int8_t*)cfg.cache,
-            (half*)cfg.scale});
+        if (cfg.cache_mode == 1) {
+            dynamic_batching_kv_cache_quantize_kernel<VPT, TPB, UNIFORM_PAGE_SIZE><<<grid, TPB, 0, stream>>>(kv_store_p);
+        } else if (cfg.cache_mode == 0) {
+            dynamic_batching_kv_cache_quantize_kernel<VPT, TPB, 0><<<grid, TPB, 0, stream>>>(kv_store_p);
+        } else {
+            LOG(ERROR) << "invalid cache_mode " << cfg.cache_mode;
+            return ppl::common::RC_UNSUPPORTED;
+        }
     }
 
-    struct dynamic_batching_decoding_cache_attention_kernel_param p{0};
-    p.query = (half*)cfg.query;
-    p.attn_mask = (half*)cfg.attn_mask;
-    p.output = (half*)cfg.output;
-    p.cache = (int8_t*)cfg.cache;
-    p.scale = (half*)cfg.scale;
-    p.cachestarts = (int64_t*)cfg.cachestarts;
-    p.kvstarts = (int64_t*)cfg.kvstarts;
-    p.attn_scale = cfg.attn_scale;
-    p.layer_idx = cfg.layer_idx;
-    p.num_kv_repeats = cfg.num_kv_repeats;
-    p.query_stride_s = cfg.q_stride_s;
-    p.output_stride_s = cfg.o_stride_s;
-    p.mask_stride_s = cfg.mask_stride_s;
-    p.mask_stride_h = cfg.mask_stride_h;
-    p.cache_stride_s = cfg.cache_stride_s;
-    p.cache_stride_l = cfg.cache_stride_l;
-    p.cache_stride_h = cfg.cache_stride_h;
-    p.cache_stride_kv = cfg.cache_stride_kv;
-
+    struct dynamic_batching_decoding_cache_attention_kernel_param deocde_p{0};
+    deocde_p.query = (half*)cfg.query;
+    deocde_p.attn_mask = (half*)cfg.attn_mask;
+    deocde_p.output = (half*)cfg.output;
+    deocde_p.cache = (int8_t*)cfg.cache;
+    deocde_p.scale = (half*)cfg.scale;
+    deocde_p.cachestarts = (int64_t*)cfg.cachestarts;
+    deocde_p.kvstarts = (int64_t*)cfg.kvstarts;
+    deocde_p.attn_scale = cfg.attn_scale;
+    deocde_p.layer_idx = cfg.layer_idx;
+    deocde_p.num_kv_repeats = cfg.num_kv_repeats;
+    deocde_p.page_size = cfg.page_size;
+    deocde_p.query_stride_s = cfg.q_stride_s;
+    deocde_p.output_stride_s = cfg.o_stride_s;
+    deocde_p.mask_stride_s = cfg.mask_stride_s;
+    deocde_p.mask_stride_h = cfg.mask_stride_h;
+    deocde_p.cache_stride_s = cfg.cache_stride_s;
+    deocde_p.cache_stride_l = cfg.cache_stride_l;
+    deocde_p.cache_stride_h = cfg.cache_stride_h;
+    deocde_p.cache_stride_kv = cfg.cache_stride_kv;
+    deocde_p.cachestarts_stride_b = cfg.cachestarts_stride_b;
     if(cfg.decoding_batches > 0) {
         const int64_t MAX_SHM_SIZE = cfg.device_prop->sharedMemPerBlockOptin;
 
         if (cfg.decoding_shm_size <= MAX_SHM_SIZE) {
             ppl::common::RetCode status = ppl::common::RC_UNSUPPORTED;
             if (cfg.decoding_multi_block_size > 1) {
-                p.multi_block.partial_out   = (half*)cfg.temp_buffer;
-                p.multi_block.log_sum_exp   = reinterpret_cast<float*>((char*)cfg.temp_buffer
+                deocde_p.multi_block.partial_out   = (half*)cfg.temp_buffer;
+                deocde_p.multi_block.log_sum_exp   = reinterpret_cast<float*>((char*)cfg.temp_buffer
                     + cfg.decoding_multi_block_output_size);
-                p.multi_block.block_counter = reinterpret_cast<int32_t*>((char*)cfg.temp_buffer
+                deocde_p.multi_block.block_counter = reinterpret_cast<int32_t*>((char*)cfg.temp_buffer
                     + cfg.decoding_multi_block_output_size
                     + cfg.decoding_multi_block_sum_size);
-                cudaMemsetAsync(p.multi_block.block_counter, 0, cfg.decoding_multi_block_counter_size, stream);
-                status = dynamic_batching_decoding_cache_attention<256, true>(stream, cfg, p);
+                cudaMemsetAsync(deocde_p.multi_block.block_counter, 0, cfg.decoding_multi_block_counter_size, stream);
+                status = dynamic_batching_decoding_cache_attention<256, true>(stream, cfg, deocde_p);
             } else if (cfg.decoding_threads_per_block == 256) {
-                status = dynamic_batching_decoding_cache_attention<256, false>(stream, cfg, p);
+                status = dynamic_batching_decoding_cache_attention<256, false>(stream, cfg, deocde_p);
             } else if (cfg.decoding_threads_per_block == 512) {
-                status = dynamic_batching_decoding_cache_attention<512, false>(stream, cfg, p);
+                status = dynamic_batching_decoding_cache_attention<512, false>(stream, cfg, deocde_p);
             } else if (cfg.decoding_threads_per_block == 1024) {
-                status = dynamic_batching_decoding_cache_attention<1024, false>(stream, cfg, p);
+                status = dynamic_batching_decoding_cache_attention<1024, false>(stream, cfg, deocde_p);
             }
             if (status != ppl::common::RC_SUCCESS) {
                 LOG(ERROR) << "unsupported decoding_multi_block_size and decoding_threads_per_block";
@@ -1491,7 +1545,7 @@ ppl::common::RetCode dynamic_batching_multi_head_cache_attention(
             cfg.attn_mask,
             prefill_seqstart_q,
             prefill_seqstart_q,
-            nullptr,
+            cfg.alibi_slopes,
             cfg.prefill_batches,
             0, cfg.q_stride_s, cfg.head_dim,
             0, cfg.k_stride_s, cfg.head_dim,
