@@ -5,6 +5,7 @@ project(ppl.llm.kernel.cuda)
 # options
 option(PPLNN_CUDA_ENABLE_NCCL "enable nccl" OFF)
 option(PPLNN_INSTALL "" ON)
+option(PPLNN_CUDA_DISABLE_CONV_ALL "" ON)
 
 if(MSVC)
     option(PPLNN_USE_MSVC_STATIC_RUNTIME "" ON)
