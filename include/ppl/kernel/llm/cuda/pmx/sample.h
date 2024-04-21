@@ -22,19 +22,39 @@
 
 namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pmx {
 
-int32_t flash_sample_top_p_get_pad_vocab_size(int32_t vocab_size);
+int64_t flash_sample_top_p_get_workspace_size(
+    int32_t batch,
+    int32_t vocab_size);
 
-ppl::common::RetCode flash_sample_top_p(
+ppl::common::RetCode flash_sample_topp(
     cudaStream_t stream,
     const float* logits, // (batch, batch_stride)
+    const float* temperatures, // (batch)
+    const float* top_p, // (batch)
     const int32_t num_batches,
     const int32_t vocab_size,
     const int32_t batch_stride,
+    const float top_p_val,
+    void *workspace,
+    int32_t* output);
+
+int64_t sample_topk_topp_get_workspace_size(
+    int32_t batch,
+    int32_t vocab_size,
+    int32_t top_k_val);
+
+ppl::common::RetCode sample_topk_topp(
+    cudaStream_t stream,
+    const float* logits, // (batch, batch_stride)
     const float* temperatures, // (batch)
-    const float top_p,
-    float* sorted_value, // (batch, padded_vocab_szie)
-    int32_t* sorted_index, // (batch, padded_vocab_szie)
-    int32_t* output); // (batch)
+    const float* top_p, // (batch)
+    const int32_t num_batches,
+    const int32_t vocab_size,
+    const int32_t batch_stride,
+    const int32_t top_k_val,
+    const float top_p_val,
+    void *workspace,
+    int32_t* output);
 
 ppl::common::RetCode sample_argmax(
     cudaStream_t stream,
@@ -42,7 +62,7 @@ ppl::common::RetCode sample_argmax(
     const int32_t num_batches,
     const int32_t vocab_size,
     const int32_t batch_stride,
-    int32_t* output); // (batch)
+    int32_t* output);
 
 }}}}}
 
