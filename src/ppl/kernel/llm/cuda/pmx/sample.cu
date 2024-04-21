@@ -26,7 +26,7 @@
 
 namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pmx {
 
-using fp32_t  = float;
+using fp32_t = float;
 
 struct SortingPair {
     fp32_t value;
@@ -35,10 +35,10 @@ struct SortingPair {
 };
 
 template<typename Dtype, int32_t TPB>
-__device__ __host__ inline 
+__device__ __host__ inline
 int32_t pad_vocab(int32_t vocab_size)
 {
-    // 在词表后面拼一些词让我可以向量化访存，还不用判断边界情况
+    // for vector load/store
     constexpr int32_t VPT = 16 / sizeof(Dtype);
     return vocab_size + (TPB * VPT) - vocab_size % (TPB * VPT);
 }
@@ -99,7 +99,7 @@ fp32_t sample_block_reduce_max(fp32_t reducing, fp32_t *shared_mem)
 
 template<int32_t WPT>
 __device__ inline
-SortingPair sample_block_reduce_max_with_index(fp32_t reducing, void *shared_mem)
+SortingPair sample_block_reduce_max_with_index(fp32_t reducing, int32_t index, void *shared_mem)
 {
     // Helper function for reduce max.
     constexpr int32_t WARP_SIZE = 32;
@@ -107,10 +107,10 @@ SortingPair sample_block_reduce_max_with_index(fp32_t reducing, void *shared_mem
     const int32_t warp_id = threadIdx.x / WARP_SIZE;
 
     int32_t* shared_mem_i32 = reinterpret_cast<int32_t*>(shared_mem);
-    fp32_t* shared_mem_fp32 = reinterpret_cast<fp32_t*>(shared_mem);
+    fp32_t* shared_mem_fp32 = reinterpret_cast<fp32_t*>(shared_mem) + WPT;
 
     fp32_t reducing_value = reducing, receving_value;
-    int32_t reducing_index = threadIdx.x, receving_index;
+    int32_t reducing_index = index, receving_index;
 
     for (int32_t mask = WARP_SIZE / 2; mask >= 1; mask /= 2) {
         receving_value = __shfl_xor_sync(uint32_t(-1), reducing_value, mask);
@@ -123,14 +123,14 @@ SortingPair sample_block_reduce_max_with_index(fp32_t reducing, void *shared_mem
     }
 
     if (lane_id == 0) {
-        shared_mem_fp32[warp_id]            = reducing_value;
-        shared_mem_i32[warp_id + WARP_SIZE] = reducing_index;
+        shared_mem_fp32[warp_id] = reducing_value;
+        shared_mem_i32[warp_id] = reducing_index;
     }
     __syncthreads();
 
     if (lane_id < WPT) {
         reducing_value = shared_mem_fp32[lane_id];
-        reducing_index = shared_mem_i32[lane_id + WARP_SIZE];
+        reducing_index = shared_mem_i32[lane_id];
     }
     else {
         reducing_value = -FLT_MAX;
@@ -181,27 +181,248 @@ fp32_t sample_block_reduce_sum(fp32_t reducing, fp32_t *shared_mem)
     return reducing;
 }
 
+struct SamplePrefixOp
+{
+    // Powered by TRT
+    fp32_t running_total;
+
+    __device__ SamplePrefixOp(fp32_t running_total) : running_total(running_total) {}
+
+    __device__ fp32_t operator() (fp32_t block_aggregate) {
+        fp32_t old_prefix = running_total;
+        running_total += block_aggregate;
+        return old_prefix;
+    }
+};
+
+template<int32_t TPB, int32_t VPT>
+__global__
+void sample_topk_topp_default_kernel(
+    const fp32_t __restrict__ *logits,      // [num_batches, batch_stride]
+    const fp32_t *temperatures,             // [num_batches]
+    const fp32_t *top_p,                    // [num_batches]
+    const int32_t vocab_size,
+    const int32_t batch_stride,
+    const int32_t top_k_val,
+    const fp32_t top_p_val,
+    const fp32_t rnd,
+    fp32_t *padded_logits,                  // [num_batches, padded_vocab_size]
+    int32_t *output)                        // [num_batches, 1])
+{
+    constexpr int32_t WARP_SIZE = 32;
+    constexpr int32_t WPT = TPB / WARP_SIZE; // warp per thread block.
+
+    const int64_t batch_id            = blockIdx.x;
+    const int64_t batch_offset        = batch_id * batch_stride;
+    const int64_t padded_batch_offset = batch_id * pad_vocab<fp32_t, TPB>(vocab_size);
+    const fp32_t  temperature         = max(abs(temperatures[batch_id]) + 1e-7, 0.01); // temperature 最低 0.01
+
+    extern __shared__ fp32_t topk_shm[];
+    fp32_t *topk_sums = topk_shm;
+    int32_t *topk_idxs = reinterpret_cast<int32_t*>(&topk_shm[top_k_val]);
+    __shared__ fp32_t reducing_memory[WPT * 2];
+
+    fp32_t max_val = -FLT_MAX;
+    int32_t max_idx = -1;
+    float local_sum = 1.f;
+
+    for (int32_t vocab_base = threadIdx.x * VPT; vocab_base < vocab_size; vocab_base += TPB * VPT) {
+        fp32_t local_vals[VPT];
+
+        #pragma unroll
+        for (int32_t vec_idx = 0; vec_idx < VPT; vec_idx += 1) {
+            int32_t vocab_idx = vocab_base + vec_idx;
+            local_vals[vec_idx] = logits[batch_offset + vocab_idx] / temperature;
+            if (local_vals[vec_idx] > max_val) {
+                max_val = local_vals[vec_idx];
+                max_idx = vocab_idx;
+            }
+        }
+
+        copy<VPT * sizeof(fp32_t)>(local_vals, &padded_logits[padded_batch_offset + vocab_base]);
+
+        SortingPair p = sample_block_reduce_max_with_index<WPT>(max_val, max_idx, reducing_memory);
+        max_val = p.value;
+        max_idx = p.index;
+    }
+
+    if (threadIdx.x == 0) {
+        topk_sums[0] = 1.f;
+        topk_idxs[0] = max_idx;
+        padded_logits[padded_batch_offset + max_idx] = -FLT_MAX;
+    }
+    __syncthreads();
+
+    for (int i = 1; i < top_k_val; i += 1) {
+        fp32_t local_max_val = -FLT_MAX;
+        int32_t local_max_idx = -1;
+        for (int32_t vocab_base = threadIdx.x * VPT; vocab_base < vocab_size; vocab_base += TPB * VPT) {
+            fp32_t local_vals[VPT];
+            copy<VPT * sizeof(fp32_t)>(&padded_logits[padded_batch_offset + vocab_base], local_vals);
+
+            #pragma unroll
+            for (int32_t vec_idx = 0; vec_idx < VPT; vec_idx += 1) {
+                if (local_vals[vec_idx] > local_max_val) {
+                    local_max_val = local_vals[vec_idx];
+                    local_max_idx = vocab_base + vec_idx;
+                }
+            }
+
+            SortingPair p = sample_block_reduce_max_with_index<WPT>(local_max_val, local_max_idx, reducing_memory);
+            local_max_val = p.value;
+            local_max_idx = p.index;
+        }
+
+        local_max_val = exp(local_max_val - max_val);
+        local_sum += local_max_val;
+
+        if (threadIdx.x == 0) {
+            topk_sums[i] = local_sum;
+            topk_idxs[i] = local_max_idx;
+            padded_logits[padded_batch_offset + local_max_idx] = -FLT_MAX;
+        }
+    }
+
+    // sample
+    __syncthreads();
+
+    local_sum = __fdividef(1.f, local_sum + 1e-6f);
+    const fp32_t top_p_selection = (top_p == nullptr ? top_p_val : top_p[batch_id]) * rnd;
+    const int32_t kpad = (int32_t)((top_k_val + TPB - 1) / TPB) * TPB;
+    int32_t count = 0;
+    int32_t select_kid;
+
+    for (int32_t i = threadIdx.x; i < kpad; i += 1) {
+        fp32_t prob_sum = (i < top_k_val) ? topk_sums[i] * local_sum : 1.f;
+        count = __syncthreads_count(prob_sum >= top_p_selection);
+        select_kid = i;
+        if (count != 0) {
+            break;
+        }
+    }
+
+    if (threadIdx.x == min(TPB - count, TPB - 1)) {
+        output[batch_id] = topk_idxs[select_kid];
+    }
+}
+
+
+template<int32_t TPB, int32_t LPT, int32_t KPT>
+__global__
+void sample_topk_topp_radix_select_kernel(
+    const fp32_t __restrict__ *logits,      // [num_batches, batch_stride]
+    const fp32_t *temperatures,             // [num_batches]
+    const fp32_t *top_p,                    // [num_batches]
+    const int32_t vocab_size,
+    const int32_t batch_stride,
+    const int32_t top_k_val,
+    const fp32_t top_p_val,
+    const fp32_t rnd,
+    int32_t *output)                        // [num_batches, 1])
+{
+    constexpr int32_t WARP_SIZE = 32;
+    constexpr int32_t WPT = TPB / WARP_SIZE; // warp per thread block.
+    constexpr int32_t LOAD_LEN = LPT - KPT;
+
+    const int64_t batch_id            = blockIdx.x;
+    const int64_t batch_offset        = batch_id * batch_stride;
+    const fp32_t  temperature         = max(abs(temperatures[batch_id]) + 1e-7, 0.01); // temperature 最低 0.01
+
+    __shared__ fp32_t reducing_memory[WPT * 2];
+
+    fp32_t local_vals[LPT];
+    int32_t local_idxs[LPT];
+    #pragma unroll
+    for (int32_t i = 0; i < KPT; i += 1) {
+        int32_t vocab_idx = threadIdx.x + i * TPB;
+        local_vals[i] = logits[batch_offset + vocab_idx] / temperature;
+        local_idxs[i] = vocab_idx;
+    }
+
+    typedef cub::BlockRadixSort<fp32_t, TPB, LPT, int32_t> BlockRadixSort;
+    __shared__ typename BlockRadixSort::TempStorage sort_storage;
+
+    for (int vocab_base = threadIdx.x + KPT * TPB; vocab_base < vocab_size; vocab_base += TPB * LOAD_LEN) {
+        #pragma unroll
+        for (int32_t i = 0; i < LOAD_LEN; i += 1) {
+            int32_t vocab_idx = vocab_base + i * TPB;
+            if (vocab_idx < vocab_size) {
+                local_vals[i + KPT] = logits[batch_offset + vocab_idx] / temperature;
+                local_idxs[i + KPT] = vocab_idx;
+            } else {
+                local_vals[i + KPT] = -FLT_MAX;
+                local_idxs[i + KPT] = -1;
+            }
+        }
+        __syncthreads();
+        BlockRadixSort(sort_storage).SortDescendingBlockedToStriped(local_vals, local_idxs);
+    }
+
+    if (threadIdx.x == 0) {
+        reducing_memory[0] = local_vals[0];
+    }
+    __syncthreads();
+
+    float local_sum = 0.f;
+    fp32_t max_val = reducing_memory[0];
+
+    for (int32_t i = 0; i < KPT; i += 1) {
+        if (threadIdx.x + i * TPB < top_k_val) {
+            local_vals[i] = exp(local_vals[i] - max_val);
+            local_sum += local_vals[i];
+        }
+    }
+
+    local_sum = sample_block_reduce_sum<WPT>(local_sum, reducing_memory);
+    local_sum = __fdividef(1.f, local_sum + 1e-6f);
+
+    typedef cub::BlockScan<float, TPB> BlockScan;
+    __shared__ typename BlockScan::TempStorage scan_storage;
+    SamplePrefixOp prefix_op(0);
+
+    const fp32_t top_p_selection = (top_p == nullptr ? top_p_val : top_p[batch_id]) * rnd;
+    fp32_t prob_sum = 0.f;
+    int32_t count = 0;
+    int32_t select_idx;
+
+    for (int32_t i = 0; i < KPT; i += 1) {
+        int32_t top_idx = threadIdx.x + i * TPB;
+        fp32_t prob = (top_idx < top_k_val) ? local_vals[i] * local_sum : 0.f;
+        BlockScan(scan_storage).InclusiveSum(prob, prob_sum, prefix_op);
+        count = __syncthreads_count(prob_sum >= top_p_selection);
+        select_idx = local_idxs[i];
+        if (count != 0) {
+            break;
+        }
+    }
+
+    if (threadIdx.x == min(TPB - count, TPB - 1)) {
+        output[batch_id] = select_idx;
+    }
+}
+
 
 template<int32_t TPB, int32_t VPT, int32_t TILE>
 __global__
 void flash_sample_top_p_kernel(
     const fp32_t __restrict__ *logits,      // [num_batches, batch_stride]
-    const fp32_t *temperatures,             // [num_batches, 1]
-    fp32_t *sorted_value,                   // [num_batches, padded_vocab_size]
-    int32_t *sorted_order,                  // [num_batches, padded_vocab_size]
-    int32_t *output,                        // [num_batches, 1]
+    const fp32_t *temperatures,             // [num_batches]
+    const fp32_t *top_p,                    // [num_batches]
     const int32_t vocab_size,
     const int32_t batch_stride,
+    const fp32_t top_p_val,
     const fp32_t rnd,
-    const fp32_t top_p)
+    fp32_t *sorted_value,                   // [num_batches, padded_vocab_size]
+    int32_t *sorted_order,                  // [num_batches, padded_vocab_size]
+    int32_t *output)                        // [num_batches])
 {
-    /* 
+    /*
         这是一个投机取巧版本的 Sample Topp 实现，我想它应该是一个非常快的版本。
-        
+
         Sample Topp 操作要分成几个部分来完成：
-            
+
             首先要执行一次排序，由于访存无法被合并，这次排序操作会很慢。
-            
+
             而后要执行 softmax，这意味着三次访存(分别统计 global_max, global_sum, 以及执行 softmax 计算)
 
             然后你要对 global_sum 乘以一个 [0, 1] 之间的随机数，去执行 sampling 操作，这里我选择使用"接受拒绝采样"
@@ -224,7 +445,7 @@ void flash_sample_top_p_kernel(
 
     __shared__ fp32_t tile_softmax_m[TPB];
     __shared__ fp32_t tile_softmax_l[TPB];
-    __shared__ fp32_t reducing_memory[2 * WARP_SIZE];
+    __shared__ fp32_t reducing_memory[WPT * 2];
     fp32_t sorting_keys[VPT]; int32_t sorting_values[VPT];
 
     tile_softmax_m[threadIdx.x] = 0.0f;
@@ -252,7 +473,7 @@ void flash_sample_top_p_kernel(
                 sorting_keys[internal_loop_idx]   = - value;      // 倒序排序
                 sorting_values[internal_loop_idx] = vocab_idx;
                 local_max = local_max > value ? local_max : value;
-            } else { 
+            } else {
                 sorting_keys[internal_loop_idx]   = FLT_MAX;
                 sorting_values[internal_loop_idx] = -1;
             }
@@ -296,10 +517,10 @@ void flash_sample_top_p_kernel(
     __syncthreads();
 
     global_sum = sample_block_reduce_sum<WPT>(
-        tile_softmax_m[threadIdx.x] * exp(tile_softmax_l[threadIdx.x] - global_max), 
+        tile_softmax_m[threadIdx.x] * exp(tile_softmax_l[threadIdx.x] - global_max),
         reducing_memory);
 
-    fp32_t top_p_selection_rnd = global_sum * top_p * rnd;
+    fp32_t top_p_selection_rnd = global_sum * (top_p == nullptr ? top_p_val : top_p[batch_id]) * rnd;
 
     // multi way merge-sort & sample top_p
     // 后面这里的采样过程可以进一步优化，但是好像正常来讲不会采样非常多次
@@ -315,7 +536,7 @@ void flash_sample_top_p_kernel(
     auto _local_storage = sorting_keys; // 复用一下
     CachedVocabStorage<TPB, VPT> cached_store(
         sorted_value, _local_storage, padded_batch_offset + base_selection_idx);
-    
+
     for (int32_t selected = 0; selected < vocab_size; selected += 1) {
         fp32_t selecting_value = -FLT_MAX;
         int32_t select_thread_idx = 0;
@@ -327,7 +548,7 @@ void flash_sample_top_p_kernel(
         }
 
         // block mergesort
-        SortingPair p = sample_block_reduce_max_with_index<WPT>(selecting_value, reducing_memory);
+        SortingPair p = sample_block_reduce_max_with_index<WPT>(selecting_value, threadIdx.x, reducing_memory);
         select_thread_idx = p.index;
         selecting_value = p.value;
         top_p_selection_rnd -= selecting_value;
@@ -336,8 +557,8 @@ void flash_sample_top_p_kernel(
             if (top_p_selection_rnd <= 0.0f) {
                 // sampling success, write to output.
                 output[batch_id] = sorted_order[
-                    padded_batch_offset + 
-                    select_thread_idx * VPT * TPB + 
+                    padded_batch_offset +
+                    select_thread_idx * VPT * TPB +
                     selection_slot[select_thread_idx]
                 ];
             }
@@ -349,64 +570,10 @@ void flash_sample_top_p_kernel(
     }
 }
 
-int32_t flash_sample_top_p_get_pad_vocab_size(int32_t vocab_size) {
-    return pad_vocab<fp32_t, 256>(vocab_size);
-}
-
-ppl::common::RetCode flash_sample_top_p(
-    cudaStream_t stream,
-    const float* logits, // (batch, batch_stride)
-    const int32_t num_batches,
-    const int32_t vocab_size,
-    const int32_t batch_stride,
-    const float* temperatures, // (batch)
-    const float top_p,
-    float* sorted_value, // (batch, padded_vocab_szie)
-    int32_t* sorted_index, // (batch, padded_vocab_szie)
-    int32_t* output) // (batch)
-{
-    /* Flash Sample Topp 
-    
-    The FlashSampleTopp function is a high-performance Topp sampling implementation that integrates the functionalities of 
-        Sorting, Softmax, and Topp sampling.
-
-     sorted_value  {num_batches, pad_vocab<fp32_t, 256>(vocab_size)}
-
-     sorted_index = {num_batches, pad_vocab<fp32_t, 256>(vocab_size)}
-
-    */
-
-    const fp32_t rand_val = static_cast<float>(rand()) / RAND_MAX;
-
-    if (vocab_size <= 32768) {
-        flash_sample_top_p_kernel<256, 4, 32>
-        <<<num_batches, 256, 0, stream>>>(
-            logits, temperatures,
-            sorted_value, sorted_index,
-            output, vocab_size, batch_stride,
-            rand_val, top_p
-        );
-    } else if (vocab_size <= 262144) {
-        flash_sample_top_p_kernel<256, 4, 256>
-        <<<num_batches, 256, 0, stream>>>(
-            logits, temperatures,
-            sorted_value, sorted_index,
-            output, vocab_size, batch_stride,
-            rand_val, top_p
-        );
-    } else {
-        LOG(ERROR) << "only supporte vocab_size <= 262144, vocab_size = " << vocab_size;
-        return ppl::common::RC_UNSUPPORTED;
-    }
-
-    return ppl::common::RC_SUCCESS;
-}
-
-
 template<int32_t TPB>
 __global__
 void sample_argmax_kernel(
-    const fp32_t* __restrict__ logits, // [batch, batch_stride] 
+    const fp32_t* __restrict__ logits, // [batch, batch_stride]
     const int32_t vocab_size,
     const int32_t batch_stride,
     int32_t* output)                   // [batch, 1]
@@ -418,7 +585,7 @@ void sample_argmax_kernel(
     for(int32_t idx = threadIdx.x; idx < vocab_size; idx += TPB) {
         // fp32_t loading = __half2float(logits[batch_id * vocab_size + idx]);
         fp32_t loading = logits[batch_id * batch_stride + idx];
-        if(loading > selecting_value){
+        if (loading > selecting_value) {
             selecting_value = loading;
             selection_idx   = idx;
         }
@@ -427,18 +594,158 @@ void sample_argmax_kernel(
     // initilize shared memory
     constexpr int32_t WARP_SIZE = 32;
     constexpr int32_t WPT = TPB / WARP_SIZE;
-    constexpr int32_t RED_SMEM_SIZE = WPT + WARP_SIZE;
-
     __shared__ int32_t buffer[TPB];
-    __shared__ fp32_t red_smem[RED_SMEM_SIZE];
-
+    __shared__ fp32_t red_smem[WPT * 2];
     buffer[threadIdx.x] = selection_idx;
     __syncthreads();
 
-    SortingPair p = sample_block_reduce_max_with_index<WPT>(selecting_value, red_smem);
-    if (threadIdx.x == 0){
+    SortingPair p = sample_block_reduce_max_with_index<WPT>(selecting_value, threadIdx.x, red_smem);
+    if (threadIdx.x == 0)
         output[batch_id] = buffer[p.index];
+}
+
+int64_t flash_sample_top_p_get_workspace_size(
+    int32_t batch,
+    int32_t vocab_size)
+{
+    return int64_t(batch) * pad_vocab<fp32_t, 256>(vocab_size) * (sizeof(float) + sizeof(int));
+}
+
+ppl::common::RetCode flash_sample_topp(
+    cudaStream_t stream,
+    const float* logits, // (batch, batch_stride)
+    const float* temperatures, // (batch)
+    const float* top_p, // (batch)
+    const int32_t num_batches,
+    const int32_t vocab_size,
+    const int32_t batch_stride,
+    const float top_p_val,
+    void *workspace,
+    int32_t* output) // (batch)
+{
+    /* Flash Sample Topp
+
+    The FlashSampleTopp function is a high-performance Topp sampling implementation that integrates the functionalities of
+        Sorting, Softmax, and Topp sampling.
+
+     sorted_value  {num_batches, pad_vocab<fp32_t, 256>(vocab_size)}
+
+     sorted_index = {num_batches, pad_vocab<fp32_t, 256>(vocab_size)}
+
+    */
+
+    float* sorted_value = (float*)workspace; // (batch, padded_vocab_size)
+    int32_t* sorted_index = (int32_t*)sorted_value + pad_vocab<fp32_t, 256>(vocab_size) * sizeof(float); // (batch, padded_vocab_size)
+
+    const fp32_t rand_val = static_cast<float>(rand()) / RAND_MAX;
+
+    if (vocab_size <= 32768) {
+        flash_sample_top_p_kernel<256, 4, 32>
+        <<<num_batches, 256, 0, stream>>>(
+            logits, temperatures, top_p,
+            vocab_size, batch_stride,
+            top_p_val, rand_val,
+            sorted_value,
+            sorted_index,
+            output
+        );
+    } else if (vocab_size <= 262144) {
+        flash_sample_top_p_kernel<256, 4, 256>
+        <<<num_batches, 256, 0, stream>>>(
+            logits, temperatures, top_p,
+            vocab_size, batch_stride,
+            top_p_val, rand_val,
+            sorted_value,
+            sorted_index,
+            output
+        );
+    } else {
+        LOG(ERROR) << "only supporte vocab_size <= 262144, vocab_size = " << vocab_size;
+        return ppl::common::RC_UNSUPPORTED;
     }
+
+    return ppl::common::RC_SUCCESS;
+}
+
+int64_t sample_topk_topp_get_workspace_size(int32_t batch, int32_t vocab_size, int32_t top_k_val) {
+    int64_t buffer_size = 0;
+    if (top_k_val != 1 && top_k_val <= 12) {
+        buffer_size = int64_t(batch) * pad_vocab<fp32_t, 256>(vocab_size) * sizeof(float);
+    }
+    return buffer_size;
+}
+
+ppl::common::RetCode sample_topk_topp(
+    cudaStream_t stream,
+    const float* logits, // (batch, batch_stride)
+    const float* temperatures, // (batch)
+    const float* top_p, // (batch)
+    const int32_t num_batches,
+    const int32_t vocab_size,
+    const int32_t batch_stride,
+    const int32_t top_k_val,
+    const float top_p_val,
+    void *workspace,
+    int32_t* output) // (batch)
+{
+    constexpr int32_t TPB = 256;
+    constexpr int32_t VPT = 4;
+    constexpr int32_t LPT = 32;     // sort length per thread
+    const fp32_t rand_val = static_cast<float>(rand()) / RAND_MAX;
+
+    float* padded_logits = (float*)workspace; // (batch, padded_vocab_szie)
+
+    if (top_k_val == 1 && (!top_p && top_p_val == 0.0f)) {
+        sample_argmax_kernel<TPB>
+        <<<num_batches, TPB, 0, stream>>>(
+            logits, vocab_size, batch_stride, output
+        );
+    } else if (top_k_val <= 12) {
+        sample_topk_topp_default_kernel<TPB, VPT>
+        <<<num_batches, TPB, top_k_val * 8, stream>>>(
+            logits, temperatures, top_p,
+            vocab_size, batch_stride,
+            top_k_val, top_p_val, rand_val,
+            padded_logits, output
+        );
+    } else if (top_k_val <= 256) {
+        sample_topk_topp_radix_select_kernel<TPB, LPT, 1>
+        <<<num_batches, TPB, 0, stream>>>(
+            logits, temperatures, top_p,
+            vocab_size, batch_stride,
+            top_k_val, top_p_val, rand_val,
+            output
+        );
+    } else if (top_k_val <= 512) {
+        sample_topk_topp_radix_select_kernel<TPB, LPT, 2>
+        <<<num_batches, TPB, 0, stream>>>(
+            logits, temperatures, top_p,
+            vocab_size, batch_stride,
+            top_k_val, top_p_val, rand_val,
+            output
+        );
+    } else if (top_k_val <= 768) {
+        sample_topk_topp_radix_select_kernel<TPB, LPT, 3>
+        <<<num_batches, TPB, 0, stream>>>(
+            logits, temperatures, top_p,
+            vocab_size, batch_stride,
+            top_k_val, top_p_val, rand_val,
+            output
+        );
+    } else if (top_k_val <= 1024) {
+        sample_topk_topp_radix_select_kernel<TPB, LPT, 4>
+        <<<num_batches, TPB, 0, stream>>>(
+            logits, temperatures, top_p,
+            vocab_size, batch_stride,
+            top_k_val, top_p_val, rand_val,
+            output
+        );
+    } else {
+        LOG(ERROR) << "only supporte top_k <= 1024, top_k = " << top_k_val;
+        return ppl::common::RC_UNSUPPORTED;
+    }
+
+    return ppl::common::RC_SUCCESS;
 }
 
 ppl::common::RetCode sample_argmax(
