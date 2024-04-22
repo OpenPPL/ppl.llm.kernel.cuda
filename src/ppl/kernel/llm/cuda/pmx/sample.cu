@@ -707,7 +707,7 @@ ppl::common::RetCode sample_topk_topp(
 
     float* padded_logits = (float*)workspace; // (batch, padded_vocab_szie)
 
-    if (top_k_val == 1 && (!top_p && top_p_val == 0.0f)) {
+    if (top_k_val == 1) {
         sample_argmax_kernel<TPB>
         <<<num_batches, TPB, 0, stream>>>(
             logits, vocab_size, batch_stride, output
