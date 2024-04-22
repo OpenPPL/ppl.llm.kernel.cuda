@@ -215,7 +215,7 @@ void sample_topk_topp_default_kernel(
     const int64_t batch_id            = blockIdx.x;
     const int64_t batch_offset        = batch_id * batch_stride;
     const int64_t padded_batch_offset = batch_id * pad_vocab<fp32_t, TPB>(vocab_size);
-    const fp32_t  temperature         = max(abs(temperatures[batch_id]) + 1e-7, 0.01); // temperature 最低 0.01
+    const fp32_t  temperature         = temperatures ? max(abs(temperatures[batch_id]) + 1e-7, 0.01): 1.0f; // temperature 最低 0.01
 
     extern __shared__ fp32_t topk_shm[];
     fp32_t *topk_sums = topk_shm;
@@ -240,11 +240,10 @@ void sample_topk_topp_default_kernel(
         }
 
         copy<VPT * sizeof(fp32_t)>(local_vals, &padded_logits[padded_batch_offset + vocab_base]);
-
-        SortingPair p = sample_block_reduce_max_with_index<WPT>(max_val, max_idx, reducing_memory);
-        max_val = p.value;
-        max_idx = p.index;
     }
+    SortingPair max_pair = sample_block_reduce_max_with_index<WPT>(max_val, max_idx, reducing_memory);
+    max_val = max_pair.value;
+    max_idx = max_pair.index;
 
     if (threadIdx.x == 0) {
         topk_sums[0] = 1.f;
@@ -267,11 +266,10 @@ void sample_topk_topp_default_kernel(
                     local_max_idx = vocab_base + vec_idx;
                 }
             }
-
-            SortingPair p = sample_block_reduce_max_with_index<WPT>(local_max_val, local_max_idx, reducing_memory);
-            local_max_val = p.value;
-            local_max_idx = p.index;
         }
+        SortingPair p = sample_block_reduce_max_with_index<WPT>(local_max_val, local_max_idx, reducing_memory);
+        local_max_val = p.value;
+        local_max_idx = p.index;
 
         local_max_val = exp(local_max_val - max_val);
         local_sum += local_max_val;
@@ -284,25 +282,23 @@ void sample_topk_topp_default_kernel(
     }
 
     // sample
-    __syncthreads();
-
-    local_sum = __fdividef(1.f, local_sum + 1e-6f);
-    const fp32_t top_p_selection = (top_p == nullptr ? top_p_val : top_p[batch_id]) * rnd;
-    const int32_t kpad = (int32_t)((top_k_val + TPB - 1) / TPB) * TPB;
-    int32_t count = 0;
-    int32_t select_kid;
-
-    for (int32_t i = threadIdx.x; i < kpad; i += 1) {
-        fp32_t prob_sum = (i < top_k_val) ? topk_sums[i] * local_sum : 1.f;
-        count = __syncthreads_count(prob_sum >= top_p_selection);
-        select_kid = i;
-        if (count != 0) {
-            break;
+    float local_top_p = top_p == nullptr ? top_p_val : top_p[batch_id];
+    if (local_top_p == 0.f) {
+        if (threadIdx.x == 0) {
+            int32_t rand_idx = top_k_val * rnd;
+            output[batch_id] = topk_idxs[rand_idx];
         }
-    }
+    } else {
+        __syncthreads();
 
-    if (threadIdx.x == min(TPB - count, TPB - 1)) {
-        output[batch_id] = topk_idxs[select_kid];
+        local_sum = __fdividef(1.f, local_sum + 1e-6f);
+        const fp32_t top_p_selection = local_top_p * rnd;
+        fp32_t prob_sum = (threadIdx.x < top_k_val) ? topk_sums[threadIdx.x] * local_sum : 1.f;
+        int32_t count = __syncthreads_count((int32_t)(prob_sum >= top_p_selection));
+
+        if (threadIdx.x == min(TPB - count, TPB - 1)) {
+            output[batch_id] = topk_idxs[threadIdx.x];
+        }
     }
 }
 
@@ -326,7 +322,7 @@ void sample_topk_topp_radix_select_kernel(
 
     const int64_t batch_id            = blockIdx.x;
     const int64_t batch_offset        = batch_id * batch_stride;
-    const fp32_t  temperature         = max(abs(temperatures[batch_id]) + 1e-7, 0.01); // temperature 最低 0.01
+    const fp32_t  temperature         = temperatures ? max(abs(temperatures[batch_id]) + 1e-7, 0.01): 1.0f; // temperature 最低 0.01
 
     __shared__ fp32_t reducing_memory[WPT * 2];
 
@@ -358,46 +354,62 @@ void sample_topk_topp_radix_select_kernel(
         BlockRadixSort(sort_storage).SortDescendingBlockedToStriped(local_vals, local_idxs);
     }
 
-    if (threadIdx.x == 0) {
-        reducing_memory[0] = local_vals[0];
-    }
-    __syncthreads();
-
-    float local_sum = 0.f;
-    fp32_t max_val = reducing_memory[0];
-
-    for (int32_t i = 0; i < KPT; i += 1) {
-        if (threadIdx.x + i * TPB < top_k_val) {
-            local_vals[i] = exp(local_vals[i] - max_val);
-            local_sum += local_vals[i];
+    float local_top_p = (top_p == nullptr ? top_p_val : top_p[batch_id]);
+    if (local_top_p == 0.f) {
+        int32_t rand_idx = top_k_val * rnd;
+        int32_t rand_tid = rand_idx % TPB;
+        int32_t rand_rid = rand_idx / TPB;
+        if (threadIdx.x == rand_tid) {
+            #pragma unroll
+            for (int32_t i = 0; i < KPT; i++) {
+                if (rand_rid == i) {
+                    output[batch_id] = local_idxs[i];
+                    break;
+                }
+            }
         }
-    }
-
-    local_sum = sample_block_reduce_sum<WPT>(local_sum, reducing_memory);
-    local_sum = __fdividef(1.f, local_sum + 1e-6f);
-
-    typedef cub::BlockScan<float, TPB> BlockScan;
-    __shared__ typename BlockScan::TempStorage scan_storage;
-    SamplePrefixOp prefix_op(0);
-
-    const fp32_t top_p_selection = (top_p == nullptr ? top_p_val : top_p[batch_id]) * rnd;
-    fp32_t prob_sum = 0.f;
-    int32_t count = 0;
-    int32_t select_idx;
-
-    for (int32_t i = 0; i < KPT; i += 1) {
-        int32_t top_idx = threadIdx.x + i * TPB;
-        fp32_t prob = (top_idx < top_k_val) ? local_vals[i] * local_sum : 0.f;
-        BlockScan(scan_storage).InclusiveSum(prob, prob_sum, prefix_op);
-        count = __syncthreads_count(prob_sum >= top_p_selection);
-        select_idx = local_idxs[i];
-        if (count != 0) {
-            break;
+    } else {
+        if (threadIdx.x == 0) {
+            reducing_memory[0] = local_vals[0];
         }
-    }
+        __syncthreads();
 
-    if (threadIdx.x == min(TPB - count, TPB - 1)) {
-        output[batch_id] = select_idx;
+        float local_sum = 0.f;
+        fp32_t max_val = reducing_memory[0];
+
+        for (int32_t i = 0; i < KPT; i += 1) {
+            if (threadIdx.x + i * TPB < top_k_val) {
+                local_vals[i] = exp(local_vals[i] - max_val);
+                local_sum += local_vals[i];
+            }
+        }
+
+        local_sum = sample_block_reduce_sum<WPT>(local_sum, reducing_memory);
+        local_sum = __fdividef(1.f, local_sum + 1e-6f);
+
+        typedef cub::BlockScan<float, TPB> BlockScan;
+        __shared__ typename BlockScan::TempStorage scan_storage;
+        SamplePrefixOp prefix_op(0);
+
+        const fp32_t top_p_selection = local_top_p * rnd;
+        fp32_t prob_sum = 0.f;
+        int32_t count = 0;
+        int32_t select_idx;
+
+        for (int32_t i = 0; i < KPT; i += 1) {
+            int32_t top_idx = threadIdx.x + i * TPB;
+            fp32_t prob = (top_idx < top_k_val) ? local_vals[i] * local_sum : 1.f;
+            BlockScan(scan_storage).InclusiveSum(prob, prob_sum, prefix_op);
+            count = __syncthreads_count((int32_t)(prob_sum >= top_p_selection));
+            select_idx = local_idxs[i];
+            if (count != 0) {
+                break;
+            }
+        }
+
+        if (threadIdx.x == min(TPB - count, TPB - 1)) {
+            output[batch_id] = select_idx;
+        }
     }
 }
 
@@ -456,7 +468,7 @@ void flash_sample_top_p_kernel(
     const int64_t batch_id            = blockIdx.x;
     const int64_t batch_offset        = batch_id * batch_stride;
     const int64_t padded_batch_offset = batch_id * pad_vocab<fp32_t, TPB>(vocab_size);
-    const fp32_t  temperature         = max(abs(temperatures[batch_id]) + 1e-7, 0.01); // temperature 最低 0.01
+    const fp32_t  temperature         = temperatures ? max(abs(temperatures[batch_id]) + 1e-7, 0.01): 1.0f; // temperature 最低 0.01
 
     for(int32_t block_base_idx = 0; block_base_idx < vocab_size; block_base_idx += TPB * VPT){
         fp32_t local_max = -FLT_MAX, local_sum = 0.0;
