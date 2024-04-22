@@ -29,8 +29,8 @@ int64_t flash_sample_top_p_get_workspace_size(
 ppl::common::RetCode flash_sample_topp(
     cudaStream_t stream,
     const float* logits, // (batch, batch_stride)
-    const float* temperatures, // (batch)
-    const float* top_p, // (batch)
+    const float* optional_temperatures, // (batch)
+    const float* optional_top_p, // (batch)
     const int32_t num_batches,
     const int32_t vocab_size,
     const int32_t batch_stride,
@@ -46,8 +46,8 @@ int64_t sample_topk_topp_get_workspace_size(
 ppl::common::RetCode sample_topk_topp(
     cudaStream_t stream,
     const float* logits, // (batch, batch_stride)
-    const float* temperatures, // (batch)
-    const float* top_p, // (batch)
+    const float* optional_temperatures, // (batch)
+    const float* optional_top_p, // (batch)
     const int32_t num_batches,
     const int32_t vocab_size,
     const int32_t batch_stride,
