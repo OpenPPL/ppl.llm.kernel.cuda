@@ -225,70 +225,73 @@ void sample_topk_topp_default_kernel(
     fp32_t max_val = -FLT_MAX;
     int32_t max_idx = -1;
     float local_sum = 1.f;
+    float local_top_p = top_p == nullptr ? top_p_val : top_p[batch_id];
 
     for (int32_t vocab_base = threadIdx.x * VPT; vocab_base < vocab_size; vocab_base += TPB * VPT) {
         fp32_t local_vals[VPT];
 
         #pragma unroll
-        for (int32_t vec_idx = 0; vec_idx < VPT; vec_idx += 1) {
+        for (int32_t vec_idx = 0; vec_idx < VPT; vec_idx++) {
             int32_t vocab_idx = vocab_base + vec_idx;
-            local_vals[vec_idx] = logits[batch_offset + vocab_idx] / temperature;
+            // TODO: optimize branch (vocab_idx < vocab_size)
+            local_vals[vec_idx] = vocab_idx < vocab_size
+                ? (logits[batch_offset + vocab_idx] / temperature)
+                : -FLT_MAX;
             if (local_vals[vec_idx] > max_val) {
                 max_val = local_vals[vec_idx];
                 max_idx = vocab_idx;
             }
         }
 
-        copy<VPT * sizeof(fp32_t)>(local_vals, &padded_logits[padded_batch_offset + vocab_base]);
+        // TODO: optimize branch
+        if (local_top_p != 0.f)
+            copy<VPT * sizeof(fp32_t)>(local_vals, &padded_logits[padded_batch_offset + vocab_base]);
     }
     SortingPair max_pair = sample_block_reduce_max_with_index<WPT>(max_val, max_idx, reducing_memory);
     max_val = max_pair.value;
     max_idx = max_pair.index;
 
-    if (threadIdx.x == 0) {
-        topk_sums[0] = 1.f;
-        topk_idxs[0] = max_idx;
-        padded_logits[padded_batch_offset + max_idx] = -FLT_MAX;
-    }
-    __syncthreads();
-
-    for (int i = 1; i < top_k_val; i += 1) {
-        fp32_t local_max_val = -FLT_MAX;
-        int32_t local_max_idx = -1;
-        for (int32_t vocab_base = threadIdx.x * VPT; vocab_base < vocab_size; vocab_base += TPB * VPT) {
-            fp32_t local_vals[VPT];
-            copy<VPT * sizeof(fp32_t)>(&padded_logits[padded_batch_offset + vocab_base], local_vals);
-
-            #pragma unroll
-            for (int32_t vec_idx = 0; vec_idx < VPT; vec_idx += 1) {
-                if (local_vals[vec_idx] > local_max_val) {
-                    local_max_val = local_vals[vec_idx];
-                    local_max_idx = vocab_base + vec_idx;
-                }
-            }
-        }
-        SortingPair p = sample_block_reduce_max_with_index<WPT>(local_max_val, local_max_idx, reducing_memory);
-        local_max_val = p.value;
-        local_max_idx = p.index;
-
-        local_max_val = exp(local_max_val - max_val);
-        local_sum += local_max_val;
-
-        if (threadIdx.x == 0) {
-            topk_sums[i] = local_sum;
-            topk_idxs[i] = local_max_idx;
-            padded_logits[padded_batch_offset + local_max_idx] = -FLT_MAX;
-        }
-    }
-
-    // sample
-    float local_top_p = top_p == nullptr ? top_p_val : top_p[batch_id];
     if (local_top_p == 0.f) {
         if (threadIdx.x == 0) {
-            int32_t rand_idx = top_k_val * rnd;
-            output[batch_id] = topk_idxs[rand_idx];
+            output[batch_id] = max_idx;
         }
     } else {
+        if (threadIdx.x == 0) {
+            topk_sums[0] = 1.f;
+            topk_idxs[0] = max_idx;
+            padded_logits[padded_batch_offset + max_idx] = -FLT_MAX;
+        }
+        __syncthreads();
+
+        for (int32_t i = 1; i < top_k_val; i++) {
+            fp32_t local_max_val = -FLT_MAX;
+            int32_t local_max_idx = -1;
+            for (int32_t vocab_base = threadIdx.x * VPT; vocab_base < vocab_size; vocab_base += TPB * VPT) {
+                fp32_t local_vals[VPT];
+                copy<VPT * sizeof(fp32_t)>(&padded_logits[padded_batch_offset + vocab_base], local_vals);
+
+                #pragma unroll
+                for (int32_t vec_idx = 0; vec_idx < VPT; vec_idx++) {
+                    if (local_vals[vec_idx] > local_max_val) {
+                        local_max_val = local_vals[vec_idx];
+                        local_max_idx = vocab_base + vec_idx;
+                    }
+                }
+            }
+            SortingPair p = sample_block_reduce_max_with_index<WPT>(local_max_val, local_max_idx, reducing_memory);
+            local_max_val = p.value;
+            local_max_idx = p.index;
+
+            local_max_val = exp(local_max_val - max_val);
+            local_sum += local_max_val;
+
+            if (threadIdx.x == 0) {
+                topk_sums[i] = local_sum;
+                topk_idxs[i] = local_max_idx;
+                padded_logits[padded_batch_offset + local_max_idx] = -FLT_MAX;
+            }
+        }
+
         __syncthreads();
 
         local_sum = __fdividef(1.f, local_sum + 1e-6f);
@@ -329,7 +332,7 @@ void sample_topk_topp_radix_select_kernel(
     fp32_t local_vals[LPT];
     int32_t local_idxs[LPT];
     #pragma unroll
-    for (int32_t i = 0; i < KPT; i += 1) {
+    for (int32_t i = 0; i < KPT; i++) {
         int32_t vocab_idx = threadIdx.x + i * TPB;
         local_vals[i] = logits[batch_offset + vocab_idx] / temperature;
         local_idxs[i] = vocab_idx;
@@ -338,10 +341,11 @@ void sample_topk_topp_radix_select_kernel(
     typedef cub::BlockRadixSort<fp32_t, TPB, LPT, int32_t> BlockRadixSort;
     __shared__ typename BlockRadixSort::TempStorage sort_storage;
 
-    for (int vocab_base = threadIdx.x + KPT * TPB; vocab_base < vocab_size; vocab_base += TPB * LOAD_LEN) {
+    for (int32_t vocab_base = threadIdx.x + KPT * TPB; vocab_base < vocab_size; vocab_base += TPB * LOAD_LEN) {
         #pragma unroll
-        for (int32_t i = 0; i < LOAD_LEN; i += 1) {
+        for (int32_t i = 0; i < LOAD_LEN; i++) {
             int32_t vocab_idx = vocab_base + i * TPB;
+            // TODO: optimize branch
             if (vocab_idx < vocab_size) {
                 local_vals[i + KPT] = logits[batch_offset + vocab_idx] / temperature;
                 local_idxs[i + KPT] = vocab_idx;
@@ -356,17 +360,8 @@ void sample_topk_topp_radix_select_kernel(
 
     float local_top_p = (top_p == nullptr ? top_p_val : top_p[batch_id]);
     if (local_top_p == 0.f) {
-        int32_t rand_idx = top_k_val * rnd;
-        int32_t rand_tid = rand_idx % TPB;
-        int32_t rand_rid = rand_idx / TPB;
-        if (threadIdx.x == rand_tid) {
-            #pragma unroll
-            for (int32_t i = 0; i < KPT; i++) {
-                if (rand_rid == i) {
-                    output[batch_id] = local_idxs[i];
-                    break;
-                }
-            }
+        if (threadIdx.x == 0) {
+            output[batch_id] = local_idxs[0];
         }
     } else {
         if (threadIdx.x == 0) {
@@ -377,7 +372,7 @@ void sample_topk_topp_radix_select_kernel(
         float local_sum = 0.f;
         fp32_t max_val = reducing_memory[0];
 
-        for (int32_t i = 0; i < KPT; i += 1) {
+        for (int32_t i = 0; i < KPT; i++) {
             if (threadIdx.x + i * TPB < top_k_val) {
                 local_vals[i] = exp(local_vals[i] - max_val);
                 local_sum += local_vals[i];
@@ -396,7 +391,7 @@ void sample_topk_topp_radix_select_kernel(
         int32_t count = 0;
         int32_t select_idx;
 
-        for (int32_t i = 0; i < KPT; i += 1) {
+        for (int32_t i = 0; i < KPT; i++) {
             int32_t top_idx = threadIdx.x + i * TPB;
             fp32_t prob = (top_idx < top_k_val) ? local_vals[i] * local_sum : 1.f;
             BlockScan(scan_storage).InclusiveSum(prob, prob_sum, prefix_op);
@@ -476,7 +471,7 @@ void flash_sample_top_p_kernel(
         const int32_t thread_local_idx = block_base_idx + threadIdx.x;
 
         # pragma unroll
-        for(int32_t internal_loop_idx = 0; internal_loop_idx < VPT; internal_loop_idx += 1) {
+        for(int32_t internal_loop_idx = 0; internal_loop_idx < VPT; internal_loop_idx++) {
             const int32_t vocab_idx = thread_local_idx + internal_loop_idx * TPB;
             const int64_t load_idx  = batch_offset + vocab_idx;
 
@@ -504,7 +499,7 @@ void flash_sample_top_p_kernel(
         const int64_t write_idx = vocab_idx + padded_batch_offset;
 
         # pragma unroll
-        for(int32_t internal_loop_idx = 0; internal_loop_idx < VPT; internal_loop_idx += 1){
+        for(int32_t internal_loop_idx = 0; internal_loop_idx < VPT; internal_loop_idx++){
             sorting_keys[internal_loop_idx] = exp(- sorting_keys[internal_loop_idx] - local_max);
             local_sum += sorting_keys[internal_loop_idx]; // softmax in this tile
         }
@@ -549,7 +544,7 @@ void flash_sample_top_p_kernel(
     CachedVocabStorage<TPB, VPT> cached_store(
         sorted_value, _local_storage, padded_batch_offset + base_selection_idx);
 
-    for (int32_t selected = 0; selected < vocab_size; selected += 1) {
+    for (int32_t selected = 0; selected < vocab_size; selected++) {
         fp32_t selecting_value = -FLT_MAX;
         int32_t select_thread_idx = 0;
         int32_t local_selection = selection_slot[threadIdx.x];
@@ -620,7 +615,7 @@ int64_t flash_sample_top_p_get_workspace_size(
     int32_t batch,
     int32_t vocab_size)
 {
-    return int64_t(batch) * pad_vocab<fp32_t, 256>(vocab_size) * (sizeof(float) + sizeof(int));
+    return int64_t(batch) * pad_vocab<fp32_t, 256>(vocab_size) * (sizeof(float) + sizeof(int32_t));
 }
 
 ppl::common::RetCode flash_sample_topp(
@@ -707,7 +702,7 @@ ppl::common::RetCode sample_topk_topp(
 
     float* padded_logits = (float*)workspace; // (batch, padded_vocab_szie)
 
-    if (top_k_val == 1) {
+    if (top_k_val == 1 || (!top_p && top_p_val == 0.0f)) {
         sample_argmax_kernel<TPB>
         <<<num_batches, TPB, 0, stream>>>(
             logits, vocab_size, batch_stride, output
