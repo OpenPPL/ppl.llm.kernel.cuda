@@ -235,7 +235,7 @@ void sample_topk_topp_default_kernel(
             int32_t vocab_idx = vocab_base + vec_idx;
             // TODO: optimize branch (vocab_idx < vocab_size)
             local_vals[vec_idx] = vocab_idx < vocab_size
-                ? (logits[batch_offset + vocab_idx] / temperature)
+                ? logits[batch_offset + vocab_idx]
                 : -FLT_MAX;
             if (local_vals[vec_idx] > max_val) {
                 max_val = local_vals[vec_idx];
@@ -282,7 +282,7 @@ void sample_topk_topp_default_kernel(
             local_max_val = p.value;
             local_max_idx = p.index;
 
-            local_max_val = exp(local_max_val - max_val);
+            local_max_val = exp((local_max_val - max_val) / temperature);
             local_sum += local_max_val;
 
             if (threadIdx.x == 0) {
@@ -334,8 +334,13 @@ void sample_topk_topp_radix_select_kernel(
     #pragma unroll
     for (int32_t i = 0; i < KPT; i++) {
         int32_t vocab_idx = threadIdx.x + i * TPB;
-        local_vals[i] = logits[batch_offset + vocab_idx] / temperature;
-        local_idxs[i] = vocab_idx;
+        if (vocab_idx < vocab_size) {
+            local_vals[i] = logits[batch_offset + vocab_idx];
+            local_idxs[i] = vocab_idx;
+        } else {
+            local_vals[i] = -FLT_MAX;
+            local_idxs[i] = -1;
+        }
     }
 
     typedef cub::BlockRadixSort<fp32_t, TPB, LPT, int32_t> BlockRadixSort;
@@ -347,7 +352,7 @@ void sample_topk_topp_radix_select_kernel(
             int32_t vocab_idx = vocab_base + i * TPB;
             // TODO: optimize branch
             if (vocab_idx < vocab_size) {
-                local_vals[i + KPT] = logits[batch_offset + vocab_idx] / temperature;
+                local_vals[i + KPT] = logits[batch_offset + vocab_idx];
                 local_idxs[i + KPT] = vocab_idx;
             } else {
                 local_vals[i + KPT] = -FLT_MAX;
@@ -374,7 +379,7 @@ void sample_topk_topp_radix_select_kernel(
 
         for (int32_t i = 0; i < KPT; i++) {
             if (threadIdx.x + i * TPB < top_k_val) {
-                local_vals[i] = exp(local_vals[i] - max_val);
+                local_vals[i] = exp((local_vals[i] - max_val) / temperature);
                 local_sum += local_vals[i];
             }
         }
