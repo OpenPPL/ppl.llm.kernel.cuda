@@ -34,7 +34,7 @@ ppl::common::RetCode layer_norm(
     const float eps, 
     const bool skip_term,
     void* output,
-    void* skip_out);
+    void* skip_out=nullptr);
 
 }}}}}
 
