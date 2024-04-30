@@ -1169,10 +1169,15 @@ dynamic_batching_multi_head_cache_attention_prepare(
 
     const int64_t decoding_attention_total_blocks = num_heads * decoding_batches;
     const int32_t multi_processor_count = device_prop.multiProcessorCount;
+    // LOL, log_e is a magic!!!
+    const float kv_length_scale = std::max(1.0f, logf((float)max_kvlen / 1024.0));
+    const float multi_block_threshold = multi_processor_count * kv_length_scale;
 
     // get multi block size
     int64_t decoding_multi_block_size = 1;
-    if (decoding_batches > 0 && decoding_attention_total_blocks < multi_processor_count && max_kvlen >= 1024) {
+    if (decoding_batches > 0 &&
+        decoding_attention_total_blocks < multi_block_threshold &&
+        max_kvlen >= 1024) {
         while (decoding_multi_block_size < TPB / (head_dim / VPT)) {
             decoding_multi_block_size <<= 1;
         }
