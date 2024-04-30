@@ -389,7 +389,7 @@ void dynamic_batching_decoding_cache_sharemem_attention_fp16_kernel(dynamic_batc
 
         if (group_lane_id == 0 && block_context_id < block_context_len) {
             if (ATTN_MASK)
-                qk_dot += __half2float(attn_mask[block_context_id]);
+                qk_dot += __half2float(attn_mask[block_context_beg + block_context_id]);
             logits[block_context_id] = qk_dot;
             partial_qk_max = fmaxf(qk_dot, partial_qk_max);
        }
@@ -836,7 +836,7 @@ void dynamic_batching_decoding_cache_infinity_attention_fp16_kernel(dynamic_batc
 
         if (block_context_id < block_context_len) {
             if (ATTN_MASK) {
-                qk_dot += __half2float(attn_mask[block_context_id]);
+                qk_dot += __half2float(attn_mask[block_context_beg + block_context_id]);
             }
             // Computing inside performs better since using one fma per iteration
             if (qk_dot > thread_qk_max) {
