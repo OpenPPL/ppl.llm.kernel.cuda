@@ -31,10 +31,10 @@ ppl::common::RetCode layer_norm(
     const void* skip_in,
     const int32_t axis,
     const bool elementwise_affine,
-    const float eps, 
+    const float eps,
     const bool skip_term,
     void* output,
-    void* skip_out=nullptr);
+    void* skip_out);
 
 }}}}}
 
