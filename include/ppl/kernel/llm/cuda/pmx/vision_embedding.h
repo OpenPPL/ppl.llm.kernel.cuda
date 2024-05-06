@@ -24,26 +24,40 @@
 
 namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pmx {
 
+struct vision_embedding_config {
+    int32_t hidden_dim;
+    int32_t batch_size;
+    int32_t image_channel;
+    int32_t image_size;
+    int32_t patch_size;
+    int32_t grid;
+    size_t total_buffer_size;
+    size_t conv_workspace_size;
+    size_t patch_embeds_size;
+    void* buffer_addr;
+    cudnnStatus_t cudnn_status;
+    cudnnHandle_t cudnn_handle;
+    cudnnTensorDescriptor_t image_desc;
+    cudnnTensorDescriptor_t patch_nchw_desc;
+    cudnnTensorDescriptor_t patch_nhwc_desc;
+    cudnnFilterDescriptor_t filter_desc;
+    cudnnConvolutionDescriptor_t conv_desc;
+};
+
+ppl::common::RetCode vision_embedding_preprocessing(
+    vision_embedding_config& config);
+
 ppl::common::RetCode vision_embedding(
     const cudaStream_t stream,
-    cudnnHandle_t cudnn_handle,
-    cudnnTensorDescriptor_t image_desc,
+    vision_embedding_config& config,
     const void* images,
-    cudnnFilterDescriptor_t filter_desc,
     const void* patch_emb_weight,
-    cudnnConvolutionDescriptor_t conv_desc,
-    void* workspace,
-    size_t workspace_size,
-    cudnnTensorDescriptor_t patch_desc0,
-    void* patch_embeds0,
-    cudnnTensorDescriptor_t patch_desc1,
-    void* patch_embeds1,
     const void* cls_emb_weight,
     const void* pos_emb_weight,
-    int32_t grid,
-    int32_t batch_size,
-    const int32_t hidden_dim,
     void* output);
+
+ppl::common::RetCode vision_embedding_postprocessing(
+    vision_embedding_config& config);
 
 }}}}}
 
