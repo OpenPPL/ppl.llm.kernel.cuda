@@ -48,7 +48,9 @@ if(NOT Git_FOUND)
     message(FATAL_ERROR "git is required.")
 endif()
 
-set(__HPCC_COMMIT__ master)
+if(NOT PPLNN_DEP_HPCC_VERSION)
+    set(PPLNN_DEP_HPCC_VERSION master)
+endif()
 
 if(PPLNN_DEP_HPCC_PKG)
     FetchContent_Declare(hpcc
@@ -62,13 +64,11 @@ else()
     endif()
     FetchContent_Declare(hpcc
         GIT_REPOSITORY ${PPLNN_DEP_HPCC_GIT}
-        GIT_TAG ${__HPCC_COMMIT__}
+        GIT_TAG ${PPLNN_DEP_HPCC_VERSION}
         SOURCE_DIR ${HPCC_DEPS_DIR}/hpcc
         BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR}/hpcc-build
         SUBBUILD_DIR ${HPCC_DEPS_DIR}/hpcc-subbuild)
 endif()
-
-unset(__HPCC_COMMIT__)
 
 FetchContent_GetProperties(hpcc)
 if(NOT hpcc_POPULATED)
@@ -77,6 +77,10 @@ if(NOT hpcc_POPULATED)
 endif()
 
 # --------------------------------------------------------------------------- #
+
+if(NOT PPLNN_DEP_PPLCUDAKERNEL_VERSION)
+    set(PPLNN_DEP_PPLCUDAKERNEL_VERSION master)
+endif()
 
 if(PPLNN_DEP_PPLCUDAKERNEL_PKG)
     hpcc_declare_pkg_dep(ppl.kernel.cuda
@@ -87,15 +91,28 @@ else()
     endif()
     hpcc_declare_git_dep(ppl.kernel.cuda
         ${PPLNN_DEP_PPLCUDAKERNEL_GIT}
-        master)
+        ${PPLNN_DEP_PPLCUDAKERNEL_VERSION})
 endif()
 
 # --------------------------------------------------------------------------- #
 
 set(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
 
-hpcc_declare_git_dep(cutlass
-    https://github.com/NVIDIA/cutlass.git v3.2.2)
+if(NOT PPLNN_DEP_CUTLASS_VERSION)
+    set(PPLNN_DEP_CUTLASS_VERSION v3.2.2)
+endif()
+
+if(PPLNN_DEP_CUTLASS_PKG)
+    hpcc_declare_pkg_dep(cutlass
+        ${PPLNN_DEP_CUTLASS_PKG})
+else()
+    if(NOT PPLNN_DEP_CUTLASS_GIT)
+        set(PPLNN_DEP_CUTLASS_GIT "https://github.com/NVIDIA/cutlass.git")
+    endif()
+    hpcc_declare_git_dep(cutlass
+        ${PPLNN_DEP_CUTLASS_GIT}
+        ${PPLNN_DEP_CUTLASS_VERSION})
+endif()
 
 # --------------------------------------------------------------------------- #
 
