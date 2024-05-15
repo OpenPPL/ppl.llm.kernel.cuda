@@ -22,6 +22,14 @@
 
 namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pmx {
 
+typedef int32_t rope_scaling_t;
+
+struct rope_scaling {
+    static const rope_scaling_t NONE = 0;
+    static const rope_scaling_t LINEAR = 0; 
+    static const rope_scaling_t DYNAMIC = 0; 
+};
+
 ppl::common::RetCode rotary_position_embedding(
     cudaStream_t stream,
     const ppl::common::TensorShape* query_shape,
@@ -56,6 +64,9 @@ ppl::common::RetCode dynamic_batching_rotary_position_embedding(
     const int64_t num_heads,
     const int64_t num_key_heads,
     const int64_t max_seqlen,
+    const int64_t max_position_embeddings,
+    const rope_scaling_t scaling_type,
+    const float scaling_factor,
     const ppl::common::TensorShape* rotated_query_shape,
     void* rotated_query, // (seqstarts[-1], ..., head_dim), dim[1] is the leading dim of heads
     const ppl::common::TensorShape* rotated_key_shape,
