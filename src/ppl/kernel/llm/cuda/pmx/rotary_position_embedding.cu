@@ -35,7 +35,7 @@ namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pm
  */
 inline __device__
 float2 rotary_position_embedding_coeff(
-    const int64_t dim_idx, 
+    const int64_t dim_idx,
     const int64_t pos_idx,
     const int64_t rotary_dim,
     const float theta)
@@ -44,6 +44,49 @@ float2 rotary_position_embedding_coeff(
     // So we have only fp32 implementation of Rotary Embedding.
     float2 ret = {0.0f, 0.0f};
     const float freq = 1.0f / __powf(theta, (dim_idx / (float)rotary_dim)) * pos_idx;
+    __sincosf(freq, &ret.y, &ret.x);
+    return ret;
+}
+
+inline __device__
+float2 rotary_position_embedding_coeff_linear(
+    const int64_t dim_idx,
+    const int64_t pos_idx,
+    const int64_t rotary_dim,
+    const float scaling_factor,
+    const float theta)
+{
+    // fp16 does not have __sincosf instruction.
+    // So we have only fp32 implementation of Rotary Embedding.
+    float2 ret = {0.0f, 0.0f};
+    const float freq = 1.0f / __powf(theta, (dim_idx / (float)rotary_dim)) * (pos_idx / scaling_factor);
+    __sincosf(freq, &ret.y, &ret.x);
+    return ret;
+}
+
+inline __device__
+float2 rotary_position_embedding_coeff_dynamic(
+    const int64_t dim_idx,
+    const int64_t pos_idx,
+    const int64_t rotary_dim,
+    const int64_t pos_end,
+    const int64_t max_position_embeddings,
+    const float scaling_factor,
+    const float theta)
+{
+    // fp16 does not have __sincosf instruction.
+    // So we have only fp32 implementation of Rotary Embedding.
+    float _theta;
+    if (pos_end > max_position_embeddings) {
+        const float base = ((scaling_factor * pos_end) / max_position_embeddings) - (scaling_factor - 1);
+        const float expn = float(rotary_dim) / (rotary_dim - 1);
+        _theta = theta * __powf(base, expn);
+    } else {
+        _theta = theta;
+    }
+
+    float2 ret = {0.0f, 0.0f};
+    const float freq = 1.0f / __powf(_theta, (dim_idx / (float)rotary_dim)) * pos_idx;
     __sincosf(freq, &ret.y, &ret.x);
     return ret;
 }
@@ -208,6 +251,8 @@ struct dynamic_batching_rotary_position_embedding_kernel_param {
     int64_t* start_pos;
     int64_t* seqstarts;
     float theta;
+    float scaling_factor;
+    int64_t max_position_embeddings;
     int64_t rotary_dim;
     int64_t num_heads;
     int64_t num_key_heads;
@@ -220,7 +265,7 @@ struct dynamic_batching_rotary_position_embedding_kernel_param {
     half2 *rotated_key;
 };
 
-template<int32_t TPB, bool bypass_key>
+template<int32_t TPB, bool bypass_key, rope_scaling_t scaling_type>
 __global__
 void dynamic_batching_rotary_position_embedding_kernel(
     dynamic_batching_rotary_position_embedding_kernel_param p)
@@ -238,7 +283,6 @@ void dynamic_batching_rotary_position_embedding_kernel(
             auto rq_ptr = p.rotated_query + token_idx * p.rotated_query_stride_s;
             auto rk_ptr = p.rotated_key + token_idx * p.rotated_key_stride_s;
 
-
             const int64_t head_idx = tid / p.head_dim;
             const int64_t dim_idx = tid % p.head_dim;
 
@@ -249,8 +293,32 @@ void dynamic_batching_rotary_position_embedding_kernel(
             } else {
                 const float2 q = __half22float2(q_ptr[tid]);
 
-                const float2 b = rotary_position_embedding_coeff(
-                    dim_idx, pos_idx, p.rotary_dim, p.theta);
+                float2 b;
+                if (scaling_type == rope_scaling::LINEAR) {
+                    b = rotary_position_embedding_coeff_linear(
+                        dim_idx,
+                        pos_idx,
+                        p.rotary_dim,
+                        p.scaling_factor,
+                        p.theta);
+                } else if (scaling_type == rope_scaling::DYNAMIC) {
+                    const int64_t pos_end = p.start_pos[batch_idx] +
+                        (p.seqstarts[batch_idx + 1] - p.seqstarts[batch_idx]);
+                    b = rotary_position_embedding_coeff_dynamic(
+                        dim_idx,
+                        pos_idx,
+                        p.rotary_dim,
+                        pos_end,
+                        p.max_position_embeddings,
+                        p.scaling_factor,
+                        p.theta);
+                } else {
+                    b = rotary_position_embedding_coeff(
+                        dim_idx,
+                        pos_idx,
+                        p.rotary_dim,
+                        p.theta);
+                }
 
                 rq_ptr[tid] = {
                     __float2half(q.x * b.x - q.y * b.y),
@@ -289,6 +357,9 @@ ppl::common::RetCode dynamic_batching_rotary_position_embedding(
     const int64_t num_heads,
     const int64_t num_key_heads,
     const int64_t max_seqlen,
+    const int64_t max_position_embeddings,
+    const rope_scaling_t scaling_type,
+    const float scaling_factor,
     const ppl::common::TensorShape* rotated_query_shape,
     void* rotated_query, // (seqstarts[-1], ..., head_dim), dim[1] is the leading dim of heads
     const ppl::common::TensorShape* rotated_key_shape,
@@ -332,6 +403,8 @@ ppl::common::RetCode dynamic_batching_rotary_position_embedding(
         (int64_t*) start_pos,
         (int64_t*) seqstarts,
         theta,
+        scaling_factor,
+        max_position_embeddings,
         rotary_dim / 2,
         num_heads,
         num_key_heads,
@@ -346,12 +419,29 @@ ppl::common::RetCode dynamic_batching_rotary_position_embedding(
 
     const int32_t TPB = 256;
     const dim3 grid(max_seqlen, batch, (num_heads * head_dim / 2 + TPB - 1) / TPB);
-    if (bypass_key) {
-        dynamic_batching_rotary_position_embedding_kernel<TPB, true><<<grid, TPB, 0, stream>>>(p);
+    if (scaling_type == rope_scaling::NONE) {
+        if (bypass_key) {
+            dynamic_batching_rotary_position_embedding_kernel<TPB, true, rope_scaling::NONE><<<grid, TPB, 0, stream>>>(p);
+        } else {
+            dynamic_batching_rotary_position_embedding_kernel<TPB, false, rope_scaling::NONE><<<grid, TPB, 0, stream>>>(p);
+        }
+    } else if (scaling_type == rope_scaling::LINEAR) {
+        if (bypass_key) {
+            dynamic_batching_rotary_position_embedding_kernel<TPB, true, rope_scaling::LINEAR><<<grid, TPB, 0, stream>>>(p);
+        } else {
+            dynamic_batching_rotary_position_embedding_kernel<TPB, false, rope_scaling::LINEAR><<<grid, TPB, 0, stream>>>(p);
+        }
+    } else if (scaling_type == rope_scaling::DYNAMIC) {
+        if (bypass_key) {
+            dynamic_batching_rotary_position_embedding_kernel<TPB, true, rope_scaling::DYNAMIC><<<grid, TPB, 0, stream>>>(p);
+        } else {
+            dynamic_batching_rotary_position_embedding_kernel<TPB, false, rope_scaling::DYNAMIC><<<grid, TPB, 0, stream>>>(p);
+        }
     } else {
-        dynamic_batching_rotary_position_embedding_kernel<TPB, false><<<grid, TPB, 0, stream>>>(p);
+        LOG(ERROR) << "invalid scaling type: " << (int32_t)scaling_type;
+        return ppl::common::RC_INVALID_VALUE;
     }
-    
+
     return ppl::common::RC_SUCCESS;
 }
 
