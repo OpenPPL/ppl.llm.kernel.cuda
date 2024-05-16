@@ -37,6 +37,14 @@ endif()
 
 # --------------------------------------------------------------------------- #
 
+list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake/Modules)
+find_package(CUDNN QUIET)
+if(NOT CUDNN_FOUND)
+    message(FATAL_ERROR "cudnn is required.")
+endif()
+
+# --------------------------------------------------------------------------- #
+
 # compiler related
 
 if(PPLNN_USE_MSVC_STATIC_RUNTIME)
@@ -64,7 +72,6 @@ get_filename_component(__CUDA_LLM_INCLUDE_DIR__ "${CMAKE_CURRENT_SOURCE_DIR}/inc
 file(GLOB_RECURSE __CUDA_LLM_SRC__ ${__CUDA_LLM_SRC_DIR__}/*.cu)
 list(APPEND PPLNN_CUDA_KERNEL_GPU_SRC ${__CUDA_LLM_SRC__})
 list(APPEND PPLNN_CUDA_EXTERNAL_INCLUDE_DIRECTORIES ${__CUDA_LLM_INCLUDE_DIR__})
-list(APPEND PPLNN_CUDA_EXTERNAL_INCLUDE_DIRECTORIES /mnt/hpc/share/jianliheng/cudnn-linux-x86_64-8.9.6.50_cuda11-archive/include)
 unset(__CUDA_LLM_SRC__)
 unset(__CUDA_LLM_SRC_DIR__)
 unset(__CUDA_LLM_INCLUDE_DIR__)
@@ -78,8 +85,9 @@ set(__PPLNN_CUTLASS_INCLUDE_DIRECTORIES__
 list(APPEND PPLNN_CUDA_EXTERNAL_INCLUDE_DIRECTORIES ${__PPLNN_CUTLASS_INCLUDE_DIRECTORIES__})
 unset(__CUTLASS_SOURCE_DIR__)
 unset(__PPLNN_CUTLASS_INCLUDE_DIRECTORIES__)
+list(APPEND PPLNN_CUDA_EXTERNAL_INCLUDE_DIRECTORIES ${CUDNN_INCLUDE_PATH})
 
-list(APPEND PPLNN_CUDA_EXTERNAL_LINK_LIBRARIES cublasLt cudnn)
+list(APPEND PPLNN_CUDA_EXTERNAL_LINK_LIBRARIES cublasLt ${CUDNN_LIBRARY})
 
 set(PPLNN_CUDA_KERNEL_COMMON_NVCC_FLAGS "${PPLNN_CUDA_KERNEL_COMMON_NVCC_FLAGS} --expt-relaxed-constexpr")
 
