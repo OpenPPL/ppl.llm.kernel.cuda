@@ -64,12 +64,24 @@ void minmax_quantize_fp16_kernel(
     #pragma unroll
     for (int32_t i = 0; i < PACK_SIZE; i++) {
         fp32_t local_max = 0.0f;
+        fp32_t local_positive_max = 0.0f;
 
         #pragma unroll
         for (int32_t j = 0; j < KPT; j++) {
-            auto fp32_absx = abs(__half2float(local_x[i * KPT + j]));
+            auto fp32_x = __half2float(local_x[i * KPT + j]);
+            auto fp32_absx = abs(fp32_x);
+            if (fp32_x > 0.0f)
+                local_positive_max = max(fp32_absx, local_positive_max);
             local_max = max(fp32_absx, local_max);
         }
+
+        // reduction inside a thread warp
+        #pragma unroll
+        for (int32_t mask = TILE_K / 2; mask >= 1; mask /= 2) {
+            local_positive_max = max(__shfl_xor_sync(uint32_t(-1), local_positive_max, mask), local_positive_max);
+        }
+        // broadcast to threads
+        local_positive_max = __shfl_sync(uint32_t(-1), local_positive_max, 0);
 
         // reduction inside a thread warp
         #pragma unroll
@@ -79,7 +91,9 @@ void minmax_quantize_fp16_kernel(
         // broadcast to threads
         local_max = __shfl_sync(uint32_t(-1), local_max, 0);
 
-        fp32_t scale_val = min_max_range_to_scale(local_max, QTHRESHOLD, INT4_QLEVEL);
+        fp32_t scale_val = min_max_range_to_scale(
+            local_max, QTHRESHOLD,
+            local_max > local_positive_max ? INT4_QLEVEL : INT4_QLEVEL - 1);
         local_s[i] = __float2half(scale_val);
 
         // quant and pack int4 to int4x4
