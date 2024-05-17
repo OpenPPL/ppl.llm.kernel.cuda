@@ -201,11 +201,12 @@ void sample_topk_topp_default_kernel(
     const fp32_t __restrict__ *logits,      // [num_batches, batch_stride]
     const fp32_t *temperatures,             // [num_batches]
     const fp32_t *top_p,                    // [num_batches]
+    const fp32_t *rnd,                      // [num_batches]
     const int32_t vocab_size,
     const int32_t batch_stride,
     const int32_t top_k_val,
     const fp32_t top_p_val,
-    const fp32_t rnd,
+    const fp32_t rnd_val,
     fp32_t *padded_logits,                  // [num_batches, padded_vocab_size]
     int32_t *output)                        // [num_batches, 1])
 {
@@ -295,7 +296,7 @@ void sample_topk_topp_default_kernel(
         __syncthreads();
 
         local_sum = __fdividef(1.f, local_sum + 1e-6f);
-        const fp32_t top_p_selection = local_top_p * rnd;
+        const fp32_t top_p_selection = local_top_p * (rnd == nullptr ? rnd_val : rnd[batch_id]);
         fp32_t prob_sum = (threadIdx.x < top_k_val) ? topk_sums[threadIdx.x] * local_sum : 1.f;
         int32_t count = __syncthreads_count((int32_t)(prob_sum >= top_p_selection));
 
@@ -312,11 +313,12 @@ void sample_topk_topp_radix_select_kernel(
     const fp32_t __restrict__ *logits,      // [num_batches, batch_stride]
     const fp32_t *temperatures,             // [num_batches]
     const fp32_t *top_p,                    // [num_batches]
+    const fp32_t *rnd,                      // [num_batches]
     const int32_t vocab_size,
     const int32_t batch_stride,
     const int32_t top_k_val,
     const fp32_t top_p_val,
-    const fp32_t rnd,
+    const fp32_t rnd_val,
     int32_t *output)                        // [num_batches, 1])
 {
     constexpr int32_t WARP_SIZE = 32;
@@ -391,7 +393,7 @@ void sample_topk_topp_radix_select_kernel(
         __shared__ typename BlockScan::TempStorage scan_storage;
         SamplePrefixOp prefix_op(0);
 
-        const fp32_t top_p_selection = local_top_p * rnd;
+        const fp32_t top_p_selection = local_top_p * (rnd == nullptr ? rnd_val : rnd[batch_id]);
         fp32_t prob_sum = 0.f;
         int32_t count = 0;
         int32_t select_idx;
@@ -420,10 +422,11 @@ void flash_sample_top_p_kernel(
     const fp32_t __restrict__ *logits,      // [num_batches, batch_stride]
     const fp32_t *temperatures,             // [num_batches]
     const fp32_t *top_p,                    // [num_batches]
+    const fp32_t *rnd,                      // [num_batches]
     const int32_t vocab_size,
     const int32_t batch_stride,
     const fp32_t top_p_val,
-    const fp32_t rnd,
+    const fp32_t rnd_val,
     fp32_t *sorted_value,                   // [num_batches, padded_vocab_size]
     int32_t *sorted_order,                  // [num_batches, padded_vocab_size]
     int32_t *output)                        // [num_batches])
@@ -532,7 +535,7 @@ void flash_sample_top_p_kernel(
         tile_softmax_m[threadIdx.x] * exp(tile_softmax_l[threadIdx.x] - global_max),
         reducing_memory);
 
-    fp32_t top_p_selection_rnd = global_sum * (top_p == nullptr ? top_p_val : top_p[batch_id]) * rnd;
+    fp32_t top_p_selection_rnd = global_sum * (top_p == nullptr ? top_p_val : top_p[batch_id]) * (rnd == nullptr ? rnd_val : rnd[batch_id]);
 
     // multi way merge-sort & sample top_p
     // 后面这里的采样过程可以进一步优化，但是好像正常来讲不会采样非常多次
@@ -628,10 +631,12 @@ ppl::common::RetCode flash_sample_topp(
     const float* logits, // (batch, batch_stride)
     const float* temperatures, // (batch)
     const float* top_p, // (batch)
+    const float* rnd, // (batch)
     const int32_t num_batches,
     const int32_t vocab_size,
     const int32_t batch_stride,
     const float top_p_val,
+    const float rnd_val,
     void *workspace,
     int32_t* output) // (batch)
 {
@@ -649,14 +654,12 @@ ppl::common::RetCode flash_sample_topp(
     float* sorted_value = (float*)workspace; // (batch, padded_vocab_size)
     int32_t* sorted_index = (int32_t*)sorted_value + pad_vocab<fp32_t, 256>(vocab_size) * sizeof(float); // (batch, padded_vocab_size)
 
-    const fp32_t rand_val = static_cast<float>(rand()) / RAND_MAX;
-
     if (vocab_size <= 32768) {
         flash_sample_top_p_kernel<256, 4, 32>
         <<<num_batches, 256, 0, stream>>>(
             logits, temperatures, top_p,
-            vocab_size, batch_stride,
-            top_p_val, rand_val,
+            rnd, vocab_size, batch_stride,
+            top_p_val, rnd_val,
             sorted_value,
             sorted_index,
             output
@@ -665,8 +668,8 @@ ppl::common::RetCode flash_sample_topp(
         flash_sample_top_p_kernel<256, 4, 256>
         <<<num_batches, 256, 0, stream>>>(
             logits, temperatures, top_p,
-            vocab_size, batch_stride,
-            top_p_val, rand_val,
+            rnd, vocab_size, batch_stride,
+            top_p_val, rnd_val,
             sorted_value,
             sorted_index,
             output
@@ -692,18 +695,19 @@ ppl::common::RetCode sample_topk_topp(
     const float* logits, // (batch, batch_stride)
     const float* temperatures, // (batch)
     const float* top_p, // (batch)
+    const float* rnd, // (batch)
     const int32_t num_batches,
     const int32_t vocab_size,
     const int32_t batch_stride,
     const int32_t top_k_val,
     const float top_p_val,
+    const float rnd_val,
     void *workspace,
     int32_t* output) // (batch)
 {
     constexpr int32_t TPB = 256;
     constexpr int32_t VPT = 4;
     constexpr int32_t LPT = 32;     // sort length per thread
-    const fp32_t rand_val = static_cast<float>(rand()) / RAND_MAX;
 
     float* padded_logits = (float*)workspace; // (batch, padded_vocab_szie)
 
@@ -715,41 +719,41 @@ ppl::common::RetCode sample_topk_topp(
     } else if (top_k_val <= 12) {
         sample_topk_topp_default_kernel<TPB, VPT>
         <<<num_batches, TPB, top_k_val * 8, stream>>>(
-            logits, temperatures, top_p,
+            logits, temperatures, top_p, rnd,
             vocab_size, batch_stride,
-            top_k_val, top_p_val, rand_val,
+            top_k_val, top_p_val, rnd_val,
             padded_logits, output
         );
     } else if (top_k_val <= 256) {
         sample_topk_topp_radix_select_kernel<TPB, LPT, 1>
         <<<num_batches, TPB, 0, stream>>>(
-            logits, temperatures, top_p,
+            logits, temperatures, top_p, rnd,
             vocab_size, batch_stride,
-            top_k_val, top_p_val, rand_val,
+            top_k_val, top_p_val, rnd_val,
             output
         );
     } else if (top_k_val <= 512) {
         sample_topk_topp_radix_select_kernel<TPB, LPT, 2>
         <<<num_batches, TPB, 0, stream>>>(
-            logits, temperatures, top_p,
+            logits, temperatures, top_p, rnd,
             vocab_size, batch_stride,
-            top_k_val, top_p_val, rand_val,
+            top_k_val, top_p_val, rnd_val,
             output
         );
     } else if (top_k_val <= 768) {
         sample_topk_topp_radix_select_kernel<TPB, LPT, 3>
         <<<num_batches, TPB, 0, stream>>>(
-            logits, temperatures, top_p,
+            logits, temperatures, top_p, rnd,
             vocab_size, batch_stride,
-            top_k_val, top_p_val, rand_val,
+            top_k_val, top_p_val, rnd_val,
             output
         );
     } else if (top_k_val <= 1024) {
         sample_topk_topp_radix_select_kernel<TPB, LPT, 4>
         <<<num_batches, TPB, 0, stream>>>(
-            logits, temperatures, top_p,
+            logits, temperatures, top_p, rnd,
             vocab_size, batch_stride,
-            top_k_val, top_p_val, rand_val,
+            top_k_val, top_p_val, rnd_val,
             output
         );
     } else {
