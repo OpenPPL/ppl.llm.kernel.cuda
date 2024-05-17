@@ -31,10 +31,12 @@ ppl::common::RetCode flash_sample_topp(
     const float* logits, // (batch, batch_stride)
     const float* optional_temperatures, // (batch)
     const float* optional_top_p, // (batch)
+    const float* optional_rnd, // (batch)
     const int32_t num_batches,
     const int32_t vocab_size,
     const int32_t batch_stride,
     const float top_p_val,
+    const float rnd_val,
     void *workspace,
     int32_t* output);
 
@@ -48,11 +50,13 @@ ppl::common::RetCode sample_topk_topp(
     const float* logits, // (batch, batch_stride)
     const float* optional_temperatures, // (batch)
     const float* optional_top_p, // (batch)
+    const float* optional_rnd, // (batch)
     const int32_t num_batches,
     const int32_t vocab_size,
     const int32_t batch_stride,
     const int32_t top_k_val,
     const float top_p_val,
+    const float rnd_val,
     void *workspace,
     int32_t* output);
 
