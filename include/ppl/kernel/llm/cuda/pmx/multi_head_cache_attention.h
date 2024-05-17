@@ -22,119 +22,123 @@
 
 namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pmx {
 
-struct dynamic_batching_multi_head_cache_attention_config {
-    cudaDeviceProp* device_prop;
+class dynamic_batching_multi_head_cache_attention {
+public:
+    struct config {
+        cudaDeviceProp* device_prop;
 
-    ppl::common::TensorShape* query_shape;
-    void* query;
-    ppl::common::TensorShape* current_key_shape;
-    void* current_key;
-    ppl::common::TensorShape* current_value_shape;
-    void* current_value;
-    ppl::common::TensorShape* attn_mask_shape;
-    void* attn_mask;
+        ppl::common::datatype_t datatype;
 
-    void* seqstarts;
-    void* kvstarts;
-    void* cachestarts;
-    void* start_pos;
-    void* alibi_slopes;
-    
-    void* cache;
-    void* scale;
+        void* query;
+        void* current_key;
+        void* current_value;
+        void* attn_mask;
 
-    ppl::common::TensorShape* output_shape;
-    void* output;
+        void* seqstarts;
+        void* kvstarts;
+        void* cachestarts;
+        void* start_pos;
+        void* alibi_slopes;
+        
+        void* cache;
+        void* scale;
 
-    bool is_causal;
-    int64_t batch;
-    int64_t decoding_batches;
-    int64_t max_seqlen;
-    int64_t max_kvlen;
-    int64_t layer_idx;
-    int64_t num_layer;
-    int64_t num_heads;
-    int64_t num_kv_heads;
-    int64_t head_dim;
-    int32_t cache_mode;
-    int32_t page_size;
-    int32_t page_shift;
-    int32_t page_mask;
-    int64_t cache_stride_s;
-    int64_t cache_stride_l;
-    int64_t cache_stride_h;
-    int64_t cache_stride_kv;
-    int64_t cachestarts_stride_b;
+        void* output;
 
-    // produce by prepare function
-    int64_t prefill_batches;
-    int64_t q_stride_s;
-    int64_t k_stride_s;
-    int64_t v_stride_s;
-    int64_t o_stride_s;
+        bool is_causal;
+        int64_t batch;
+        int64_t decoding_batches;
+        int64_t max_seqlen;
+        int64_t max_kvlen;
+        int64_t layer_idx;
+        int64_t num_layer;
+        int64_t num_heads;
+        int64_t num_kv_heads;
+        int64_t head_dim;
+        int32_t cache_mode;
+        int32_t page_size;
+        int32_t page_shift;
+        int32_t page_mask;
+        int64_t cache_stride_s;
+        int64_t cache_stride_l;
+        int64_t cache_stride_h;
+        int64_t cache_stride_kv;
+        int64_t cachestarts_stride_b;
 
-    int64_t mask_stride_s;
-    int64_t mask_stride_h;
+        // produce by prepare function
+        int64_t prefill_batches;
+        int64_t q_stride_s;
+        int64_t k_stride_s;
+        int64_t v_stride_s;
+        int64_t o_stride_s;
 
-    float attn_scale;
-    int64_t num_kv_repeats;
-    bool use_infinity_mhca;
-    bool use_infinity_gqca;
+        int64_t mask_stride_s;
+        int64_t mask_stride_h;
 
-    int64_t decoding_threads_per_block;
-    int64_t decoding_shm_size;
-    int64_t decoding_multi_block_size;
-    int64_t decoding_multi_block_output_size;
-    int64_t decoding_multi_block_sum_size;
-    int64_t decoding_multi_block_max_size;
-    int64_t decoding_multi_block_counter_size;
+        float attn_scale;
+        int64_t num_kv_repeats;
+        bool use_infinity_mhca;
+        bool use_infinity_gqca;
 
-    int64_t temp_buffer_size;
-    void* temp_buffer;
+        int64_t decoding_threads_per_block;
+        int64_t decoding_shm_size;
+        int64_t decoding_multi_block_size;
+        int64_t decoding_multi_block_output_size;
+        int64_t decoding_multi_block_sum_size;
+        int64_t decoding_multi_block_max_size;
+        int64_t decoding_multi_block_counter_size;
+
+        int64_t temp_buffer_size;
+        void* temp_buffer;
+    } cfg {0};
+
+    ppl::common::RetCode prepare(
+        const cudaStream_t stream,
+        const cudaDeviceProp& device_prop,
+        const ppl::common::TensorShape* query_shape,
+        const void* query, // (Sq, ..., D)
+        const ppl::common::TensorShape* current_key_shape,
+        const void* current_key, // (Skv, ..., D)
+        const ppl::common::TensorShape* current_value_shape,
+        const void* current_value, // (Skv, ..., D)
+        const ppl::common::TensorShape* attn_mask_shape,
+        const void* attn_mask, // (seqstarts[-1], aligned(kvstarts[-1], 8)), (num_heads, seqstarts[-1], aligned(kvstarts[-1], 8))
+        const void* seqstarts, // (B + 1)
+        const void* kvstarts, // (B + 1)
+        const void* cachestarts, // (B)
+        const void* start_pos, // (B)
+        const void* alibi_slopes, // (num_head)
+        const bool is_causal,
+        const int64_t batch,
+        const int64_t decoding_batches,
+        const int64_t max_seqlen,
+        const int64_t max_kvlen,
+        const int64_t layer_idx,
+        const int64_t num_layer,
+        const int64_t num_heads,
+        const int64_t num_kv_heads,
+        const int64_t head_dim,
+        const int32_t cache_mode,
+        const int64_t page_size,
+        const int64_t cache_stride_s,
+        const int64_t cache_stride_l,
+        const int64_t cache_stride_h,
+        const int64_t cache_stride_kv,
+        const int64_t cachestarts_stride_b,
+        void* cache, // int8 (S, L, 2, KVH, D), (L, KVH, S, 2, D)
+        void* scale, // float16 (S, L, 2, KVH, D/8), (L, KVH, S, 2, D/8)
+        const ppl::common::TensorShape* output_shape,
+        void* output); // (S, .., D)
+
+    // per stage forward
+    // kvstore must be the first stage 
+    ppl::common::RetCode forward_kvstore(const cudaStream_t stream);
+    ppl::common::RetCode forward_decode(const cudaStream_t stream);
+    ppl::common::RetCode forward_prefill(const cudaStream_t stream);
+
+    // all in one forward
+    ppl::common::RetCode forward(const cudaStream_t stream);
 };
-
-std::pair<ppl::common::RetCode, dynamic_batching_multi_head_cache_attention_config>
-dynamic_batching_multi_head_cache_attention_prepare(
-    const cudaStream_t stream,
-    const cudaDeviceProp& device_prop,
-    const ppl::common::TensorShape* query_shape,
-    const void* query, // (Sq, ..., D)
-    const ppl::common::TensorShape* current_key_shape,
-    const void* current_key, // (Skv, ..., D)
-    const ppl::common::TensorShape* current_value_shape,
-    const void* current_value, // (Skv, ..., D)
-    const ppl::common::TensorShape* attn_mask_shape,
-    const void* attn_mask, // (seqstarts[-1], aligned(kvstarts[-1], 8)), (num_heads, seqstarts[-1], aligned(kvstarts[-1], 8))
-    const void* seqstarts, // (B + 1)
-    const void* kvstarts, // (B + 1)
-    const void* cachestarts, // (B)
-    const void* start_pos, // (B)
-    const void* alibi_slopes, // (num_head)
-    const bool is_causal,
-    const int64_t batch,
-    const int64_t decoding_batches,
-    const int64_t max_seqlen,
-    const int64_t max_kvlen,
-    const int64_t layer_idx,
-    const int64_t num_layer,
-    const int64_t num_heads,
-    const int64_t num_kv_heads,
-    const int64_t head_dim,
-    const int32_t cache_mode,
-    const int64_t page_size,
-    const int64_t cache_stride_s,
-    const int64_t cache_stride_l,
-    const int64_t cache_stride_h,
-    const int64_t cache_stride_kv,
-    const int64_t cachestarts_stride_b,
-    void* cache, // int8 (S, L, 2, KVH, D), (L, KVH, S, 2, D)
-    void* scale, // float16 (S, L, 2, KVH, D/8), (L, KVH, S, 2, D/8)
-    const ppl::common::TensorShape* output_shape,
-    void* output); // (S, .., D)
-
-ppl::common::RetCode dynamic_batching_multi_head_cache_attention(
-    const cudaStream_t stream,
-    const dynamic_batching_multi_head_cache_attention_config &cfg);
 
 }}}}}
 
