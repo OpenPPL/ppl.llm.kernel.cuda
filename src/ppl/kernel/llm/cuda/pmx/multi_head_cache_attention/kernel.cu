@@ -1347,7 +1347,7 @@ void dynamic_batching_decoding_group_query_cache_attention_fp16_kernel(dynamic_b
     const int64_t block_idx     = blockIdx.z;
     const int32_t qo_head_base  = (QUERY_GROUP <= FULL_GROUP_SIZE)
                     ? blockIdx.x * QUERY_GROUP
-                    : blockIdx.x * FULL_GROUP_SIZE - blockIdx.x / GROUP_BLOCK_SIZE * (FULL_GROUP_SIZE - TAIL_GROUP_SIZE);
+                    : blockIdx.x / GROUP_BLOCK_SIZE * QUERY_GROUP + blockIdx.x % GROUP_BLOCK_SIZE * FULL_GROUP_SIZE;
     const int32_t kv_head_idx   = (QUERY_GROUP <= FULL_GROUP_SIZE)
                     ? blockIdx.x
                     : blockIdx.x / GROUP_BLOCK_SIZE;
@@ -1701,7 +1701,7 @@ void dynamic_batching_decoding_group_query_cache_attention_fp16_kernel(dynamic_b
             #pragma unroll
             for (int64_t i = 0; i < VALID_LOGIT_SIZE; i++) {
                 int64_t head_offset_glb = group_lane_id + i * MMA_TPG;
-                if (head_offset_glb >= head_reduce && head_offset_glb <= head_reduce + HEAD_PER_REDUCE && head_offset_glb < TAIL_GROUP_SIZE) {
+                if (head_offset_glb >= head_reduce && head_offset_glb < head_reduce + HEAD_PER_REDUCE && head_offset_glb < TAIL_GROUP_SIZE) {
                     int64_t head_offset_shm = head_offset_glb - head_reduce;
 
                     #pragma unroll
