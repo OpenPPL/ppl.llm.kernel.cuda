@@ -54,7 +54,7 @@ struct dynamic_batching_decoding_cache_attention_kernel_param {
 
     struct {
         int32_t* block_counter;
-        float* log_sum_exp;
+        float* partial_log_sum_exp;
         half* partial_out;
     } multi_block;
 };
@@ -305,7 +305,7 @@ void dynamic_batching_decoding_cache_sharemem_attention_fp16_kernel(dynamic_batc
             + batch_idx * HEAD_SIZE * MULTI_BLOCK
             + head_idx * num_batchs * HEAD_SIZE * MULTI_BLOCK;
         partial_log_sum
-            = p.multi_block.log_sum_exp
+            = p.multi_block.partial_log_sum_exp
             + batch_idx * MULTI_BLOCK
             + head_idx * num_batchs * MULTI_BLOCK;
         block_counter
@@ -731,7 +731,7 @@ void dynamic_batching_decoding_cache_infinity_attention_fp16_kernel(dynamic_batc
             + batch_idx * HEAD_SIZE * MULTI_BLOCK
             + head_idx * num_batchs * HEAD_SIZE * MULTI_BLOCK;
         partial_log_sum
-            = p.multi_block.log_sum_exp
+            = p.multi_block.partial_log_sum_exp
             + batch_idx * MULTI_BLOCK
             + head_idx * num_batchs * MULTI_BLOCK;
         block_counter
@@ -1399,7 +1399,7 @@ void dynamic_batching_decoding_group_query_cache_attention_fp16_kernel(dynamic_b
             + batch_idx * HEAD_SIZE * MULTI_BLOCK
             + qo_head_base * num_batchs * HEAD_SIZE * MULTI_BLOCK;
         partial_log_sum
-            = p.multi_block.log_sum_exp
+            = p.multi_block.partial_log_sum_exp
             + batch_idx * MULTI_BLOCK
             + qo_head_base * num_batchs * MULTI_BLOCK;
         block_counter
@@ -1899,6 +1899,7 @@ ppl::common::RetCode dynamic_batching_decoding_cache_attention(
     const int32_t THREAD_GROUP_SIZE = HEAD_SIZE / 64 * 4;
     const int32_t FULL_QUERY_GROUP  = 8;
 
+    int64_t decoding_shm_size = 0;
     auto kernel_fn = dynamic_batching_decoding_cache_infinity_attention_fp16_kernel<HEAD_SIZE, THREAD_GROUP_SIZE, TPB, QUANT_GROUP, MULTI_BLOCK, ATTN_MASK, PAGE_SIZE>;
     if (cfg.use_infinity_gqca) {
         switch (cfg.num_kv_repeats) {
@@ -1922,13 +1923,19 @@ ppl::common::RetCode dynamic_batching_decoding_cache_attention(
         kernel_fn = dynamic_batching_decoding_cache_infinity_attention_fp16_kernel<HEAD_SIZE, THREAD_GROUP_SIZE, TPB, QUANT_GROUP, MULTI_BLOCK, ATTN_MASK, PAGE_SIZE>;
     } else {
         kernel_fn = dynamic_batching_decoding_cache_sharemem_attention_fp16_kernel<HEAD_SIZE, THREAD_GROUP_SIZE, TPB, QUANT_GROUP, MULTI_BLOCK, ATTN_MASK, PAGE_SIZE>;
-    }
 
-    if (cfg.decoding_shm_size > RAW_SHM_SIZE) {
-        auto cuda_err = cudaFuncSetAttribute(kernel_fn, cudaFuncAttributeMaxDynamicSharedMemorySize, cfg.decoding_shm_size);
-        if (cuda_err == cudaErrorInvalidValue) {
-            LOG(ERROR) << "this gpu does not have enough shared-memory cache flash decoding attention requires";
-            return ppl::common::RC_UNSUPPORTED;
+        const int32_t WARP_SIZE = 32;
+        const int32_t WPT = TPB / WARP_SIZE;
+        const int32_t reduce_shm_size = TPB / WARP_SIZE * sizeof(float);
+        const int64_t max_multi_block_kvlen = (cfg.max_kvlen * sizeof(float) + cfg.decoding_multi_block_size - 1) / cfg.decoding_multi_block_size;
+        decoding_shm_size = max(max_multi_block_kvlen, WPT * HEAD_SIZE * sizeof(float));
+
+        if (decoding_shm_size > RAW_SHM_SIZE - reduce_shm_size) {
+            auto cuda_err = cudaFuncSetAttribute(kernel_fn, cudaFuncAttributeMaxDynamicSharedMemorySize, decoding_shm_size);
+            if (cuda_err == cudaErrorInvalidValue) {
+                LOG(ERROR) << "this gpu does not have enough shared-memory cache flash decoding attention requires";
+                return ppl::common::RC_UNSUPPORTED;
+            }
         }
     }
 
@@ -1939,7 +1946,7 @@ ppl::common::RetCode dynamic_batching_decoding_cache_attention(
         (unsigned int)query_group,
         (unsigned int)cfg.decoding_batches,
         (unsigned int)cfg.decoding_multi_block_size};
-    kernel_fn<<<grid_size, TPB, cfg.decoding_shm_size, stream>>>(p);
+    kernel_fn<<<grid_size, TPB, decoding_shm_size, stream>>>(p);
 
     return ppl::common::RC_SUCCESS;
 }
@@ -2063,48 +2070,41 @@ ppl::common::RetCode dynamic_batching_multi_head_cache_attention::forward_decode
     deocde_p.cachestarts_stride_b = cfg.cachestarts_stride_b;
 
     if(cfg.decoding_batches > 0) {
-        const int64_t MAX_SHM_SIZE = cfg.device_prop->sharedMemPerBlockOptin;
-
-        if (cfg.decoding_shm_size <= MAX_SHM_SIZE) {
-            ppl::common::RetCode status = ppl::common::RC_UNSUPPORTED;
-            if (cfg.decoding_multi_block_size > 1) {
-                deocde_p.multi_block.partial_out   = (half*)cfg.temp_buffer;
-                deocde_p.multi_block.log_sum_exp   = reinterpret_cast<float*>((char*)cfg.temp_buffer
-                    + cfg.decoding_multi_block_output_size);
-                deocde_p.multi_block.block_counter = reinterpret_cast<int32_t*>((char*)cfg.temp_buffer
-                    + cfg.decoding_multi_block_output_size
-                    + cfg.decoding_multi_block_sum_size);
-                cudaMemsetAsync(deocde_p.multi_block.block_counter, 0, cfg.decoding_multi_block_counter_size, stream);
-                if (cfg.cache_mode == 1) {
-                    status = dynamic_batching_decoding_cache_attention<256, true, UNIFORM_PAGE_SIZE>(stream, cfg, deocde_p);
-                } else {
-                    status = dynamic_batching_decoding_cache_attention<256, true, 0>(stream, cfg, deocde_p);
-                }
-            } else if (cfg.decoding_threads_per_block == 256) {
-                if (cfg.cache_mode == 1) {
-                    status = dynamic_batching_decoding_cache_attention<256, false, UNIFORM_PAGE_SIZE>(stream, cfg, deocde_p);
-                } else {
-                    status = dynamic_batching_decoding_cache_attention<256, false, 0>(stream, cfg, deocde_p);
-                }
-            } else if (cfg.decoding_threads_per_block == 512) {
-                if (cfg.cache_mode == 1) {
-                    status = dynamic_batching_decoding_cache_attention<512, false, UNIFORM_PAGE_SIZE>(stream, cfg, deocde_p);
-                } else {
-                    status = dynamic_batching_decoding_cache_attention<512, false, 0>(stream, cfg, deocde_p);
-                }
-            } else if (cfg.decoding_threads_per_block == 1024) {
-                if (cfg.cache_mode == 1) {
-                    status = dynamic_batching_decoding_cache_attention<1024, false, UNIFORM_PAGE_SIZE>(stream, cfg, deocde_p);
-                } else {
-                    status = dynamic_batching_decoding_cache_attention<1024, false, 0>(stream, cfg, deocde_p);
-                }
+        ppl::common::RetCode status = ppl::common::RC_UNSUPPORTED;
+        if (cfg.decoding_multi_block_size > 1) {
+            deocde_p.multi_block.partial_out           = (half*)cfg.workspace;
+            deocde_p.multi_block.partial_log_sum_exp   = reinterpret_cast<float*>((char*)cfg.workspace
+                + cfg.decoding_multi_block_partial_out_size);
+            deocde_p.multi_block.block_counter         = reinterpret_cast<int32_t*>((char*)cfg.workspace
+                + cfg.decoding_multi_block_partial_out_size
+                + cfg.decoding_multi_block_partial_log_sum_exp_size);
+            cudaMemsetAsync(deocde_p.multi_block.block_counter, 0, cfg.decoding_multi_block_counter_size, stream);
+            if (cfg.cache_mode == 1) {
+                status = dynamic_batching_decoding_cache_attention<256, true, UNIFORM_PAGE_SIZE>(stream, cfg, deocde_p);
+            } else {
+                status = dynamic_batching_decoding_cache_attention<256, true, 0>(stream, cfg, deocde_p);
             }
-            if (status != ppl::common::RC_SUCCESS) {
-                LOG(ERROR) << "unsupported decoding_multi_block_size and decoding_threads_per_block";
-                return ppl::common::RC_UNSUPPORTED;
+        } else if (cfg.decoding_threads_per_block == 256) {
+            if (cfg.cache_mode == 1) {
+                status = dynamic_batching_decoding_cache_attention<256, false, UNIFORM_PAGE_SIZE>(stream, cfg, deocde_p);
+            } else {
+                status = dynamic_batching_decoding_cache_attention<256, false, 0>(stream, cfg, deocde_p);
             }
-        } else {
-            LOG(ERROR) << "shm not enough, cache flash decoding attention is unsupported.";
+        } else if (cfg.decoding_threads_per_block == 512) {
+            if (cfg.cache_mode == 1) {
+                status = dynamic_batching_decoding_cache_attention<512, false, UNIFORM_PAGE_SIZE>(stream, cfg, deocde_p);
+            } else {
+                status = dynamic_batching_decoding_cache_attention<512, false, 0>(stream, cfg, deocde_p);
+            }
+        } else if (cfg.decoding_threads_per_block == 1024) {
+            if (cfg.cache_mode == 1) {
+                status = dynamic_batching_decoding_cache_attention<1024, false, UNIFORM_PAGE_SIZE>(stream, cfg, deocde_p);
+            } else {
+                status = dynamic_batching_decoding_cache_attention<1024, false, 0>(stream, cfg, deocde_p);
+            }
+        }
+        if (status != ppl::common::RC_SUCCESS) {
+            LOG(ERROR) << "unsupported decoding_multi_block_size and decoding_threads_per_block";
             return ppl::common::RC_UNSUPPORTED;
         }
     }

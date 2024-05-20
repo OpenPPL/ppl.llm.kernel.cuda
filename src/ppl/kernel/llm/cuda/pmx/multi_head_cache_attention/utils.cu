@@ -22,8 +22,7 @@ namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pm
 
 static constexpr int32_t UNIFORM_PAGE_SIZE = 128;
 
-ppl::common::RetCode dynamic_batching_multi_head_cache_attention::prepare(
-    const cudaStream_t stream,
+ppl::common::RetCode dynamic_batching_multi_head_cache_attention::heuristic_prepare(
     const cudaDeviceProp& device_prop,
     const ppl::common::TensorShape* query_shape,
     const void* query, // (Sq, ..., D)
@@ -136,14 +135,6 @@ ppl::common::RetCode dynamic_batching_multi_head_cache_attention::prepare(
     const int32_t gqca_total_blocks = gqca_head_blocks * decoding_batches;
     const int32_t multi_processor_count = device_prop.multiProcessorCount;
 
-    // liangjiexin: By the measurement on LLAMA 70B with A100 40G,
-    //              I suggest not to use gqca when sm has not been occupied a lot.
-    //              And gqca also increase the reduce time of multi block reduction stage.
-    //              So we have to tune the multi block policy for gqca in the feature.
-    bool use_infinity_gqca = decoding_batches > 0 && 
-        (mhca_total_blocks > multi_processor_count * 0.6f) &&
-        (num_kv_repeats == 4 || num_kv_repeats == 6 || num_kv_repeats == 8 || num_kv_repeats == 16);
-    const int32_t decoding_total_blocks = (use_infinity_gqca ? gqca_total_blocks : mhca_total_blocks);
     // Get multi block enable thresholds
     // LOL. e is a magic!!! I just want the curve be smoother.
     const int32_t kv_length_threshold = 512;
@@ -153,14 +144,37 @@ ppl::common::RetCode dynamic_batching_multi_head_cache_attention::prepare(
     const float multi_block_threshold = multi_processor_count * kv_length_scale;
 
     // Get multi block size, by measurement
-    int32_t decoding_multi_block_size = 1;
+    int32_t mhca_multi_block_size = 1;
     if (decoding_batches > 0 &&
-        decoding_total_blocks < multi_block_threshold &&
+        mhca_total_blocks < multi_block_threshold &&
         max_kvlen >= kv_length_threshold) {
-        while (decoding_multi_block_size < TPB / (head_dim / VPT)) {
-            decoding_multi_block_size <<= 1;
+        while (mhca_multi_block_size < TPB / (head_dim / VPT)) {
+            mhca_multi_block_size <<= 1;
         }
     }
+    int32_t gqca_multi_block_size = 1;
+    if (decoding_batches > 0 &&
+        gqca_total_blocks < multi_block_threshold &&
+        max_kvlen >= kv_length_threshold) {
+        while (gqca_multi_block_size < TPB / (head_dim / VPT)) {
+            gqca_multi_block_size <<= 1;
+        }
+    }
+
+    // liangjiexin: By the measurement on LLAMA 70B with A100 40G,
+    //              I suggest not to use gqca when sm has not been occupied a lot.
+    //              And gqca also increase the reduce time of multi block reduction stage.
+    //              So we have to tune the multi block policy for gqca in the feature.
+    bool use_infinity_gqca = decoding_batches > 0 &&
+        (num_kv_repeats == 4 || num_kv_repeats == 6 || num_kv_repeats == 8 || num_kv_repeats == 16);
+    if (mhca_multi_block_size == 1) {
+        use_infinity_gqca = use_infinity_gqca && (mhca_total_blocks > multi_processor_count * 0.6f);
+    } else {
+        use_infinity_gqca = use_infinity_gqca && (mhca_total_blocks > multi_processor_count * 0.3f * mhca_multi_block_size);
+    }
+    const int32_t decoding_total_blocks = (use_infinity_gqca ? gqca_total_blocks : mhca_total_blocks);
+    const int32_t decoding_multi_block_size = (use_infinity_gqca ? gqca_multi_block_size : mhca_multi_block_size);
+    
 
     // Get TPB by decoding_total_blocks
     int32_t decoding_threads_per_block = TPB;
@@ -193,18 +207,17 @@ ppl::common::RetCode dynamic_batching_multi_head_cache_attention::prepare(
 
     // Get decoding shared memory size
     bool use_infinity_mhca = false;
-    int64_t decoding_shm_size = 0;
     if (decoding_batches > 0 && !use_infinity_gqca) {
         const int64_t WPT = decoding_threads_per_block / WARP_SIZE;
         const int64_t reduce_shm_size = decoding_threads_per_block / WARP_SIZE * sizeof(float);
         const int64_t max_multi_block_kvlen =
             (max_kvlen * sizeof(float) + decoding_multi_block_size - 1) / decoding_multi_block_size;
         const int64_t logits_size = max(max_multi_block_kvlen, WPT * head_dim * sizeof(float));
-        decoding_shm_size = reduce_shm_size + logits_size;
+        const int64_t decoding_shm_size = reduce_shm_size + logits_size;
+
         // use infinity mhca when shm is not enough
         use_infinity_mhca = decoding_shm_size > (int64_t)device_prop.sharedMemPerBlockOptin;
         if (use_infinity_mhca) {
-            decoding_shm_size = 0;
             decoding_threads_per_block = std::min<int64_t>(decoding_threads_per_block, 512);
         }
     }
@@ -263,21 +276,70 @@ ppl::common::RetCode dynamic_batching_multi_head_cache_attention::prepare(
     cfg.use_infinity_mhca = use_infinity_mhca;
 
     cfg.decoding_threads_per_block = decoding_threads_per_block;
-    cfg.decoding_shm_size = decoding_shm_size;
     cfg.decoding_multi_block_size = decoding_multi_block_size;
     if (cfg.decoding_multi_block_size > 1) {
-        cfg.decoding_multi_block_output_size = decoding_batches * num_heads * head_dim * decoding_multi_block_size * sizeof(int16_t);
-        cfg.decoding_multi_block_sum_size = decoding_batches * num_heads * decoding_multi_block_size * sizeof(float);
+        cfg.decoding_multi_block_partial_out_size = decoding_batches * num_heads * head_dim * decoding_multi_block_size * sizeof(int16_t);
+        cfg.decoding_multi_block_partial_log_sum_exp_size = decoding_batches * num_heads * decoding_multi_block_size * sizeof(float);
         cfg.decoding_multi_block_counter_size = decoding_batches * num_heads * sizeof(int32_t);
     }
 
-    cfg.temp_buffer_size
-        = cfg.decoding_multi_block_output_size
-        + cfg.decoding_multi_block_sum_size
+    cfg.workspace_size
+        = cfg.decoding_multi_block_partial_out_size
+        + cfg.decoding_multi_block_partial_log_sum_exp_size
         + cfg.decoding_multi_block_counter_size;
-    cfg.temp_buffer = nullptr;
 
     return ppl::common::RC_SUCCESS;
+}
+
+void dynamic_batching_multi_head_cache_attention::manual_prepare_decode(
+    const bool force_sharemem_mhca,
+    const bool force_infinity_mhcq,
+    const bool force_infinity_gqcq,
+    const bool force_multi_block,
+    const bool force_threads_per_block,
+    const int32_t threads_per_block
+) {
+    if (force_sharemem_mhca) {
+        cfg.use_infinity_gqca = false;
+        cfg.use_infinity_mhca = false;
+    }
+
+    if (force_infinity_mhcq) {
+        cfg.use_infinity_gqca = false;
+        cfg.use_infinity_mhca = true;
+    }
+
+    if (force_infinity_gqcq) {
+        cfg.use_infinity_gqca = true;
+        cfg.use_infinity_mhca = false;
+    }
+
+    if (force_multi_block) {
+        constexpr int64_t TPB = 256;
+        constexpr int64_t VPT = 8;
+
+        // Get multi block size, by measurement
+        int32_t decoding_multi_block_size = 1;
+        while (decoding_multi_block_size < TPB / (cfg.head_dim / VPT)) {
+            decoding_multi_block_size <<= 1;
+        }
+
+        cfg.decoding_multi_block_size = decoding_multi_block_size;
+        if (cfg.decoding_multi_block_size > 1) {
+            cfg.decoding_multi_block_partial_out_size = cfg.decoding_batches * cfg.num_heads * cfg.head_dim * decoding_multi_block_size * sizeof(int16_t);
+            cfg.decoding_multi_block_partial_log_sum_exp_size = cfg.decoding_batches * cfg.num_heads * decoding_multi_block_size * sizeof(float);
+            cfg.decoding_multi_block_counter_size = cfg.decoding_batches * cfg.num_heads * sizeof(int32_t);
+        }
+
+        cfg.workspace_size
+            = cfg.decoding_multi_block_partial_out_size
+            + cfg.decoding_multi_block_partial_log_sum_exp_size
+            + cfg.decoding_multi_block_counter_size;
+    }
+
+    if (force_threads_per_block) {
+        cfg.decoding_threads_per_block = threads_per_block;
+    }
 }
 
 }}}}}
