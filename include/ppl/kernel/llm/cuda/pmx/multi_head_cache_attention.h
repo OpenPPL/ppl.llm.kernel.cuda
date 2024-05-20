@@ -81,19 +81,20 @@ public:
         bool use_infinity_gqca;
 
         int64_t decoding_threads_per_block;
-        int64_t decoding_shm_size;
         int64_t decoding_multi_block_size;
-        int64_t decoding_multi_block_output_size;
-        int64_t decoding_multi_block_sum_size;
-        int64_t decoding_multi_block_max_size;
+        int64_t decoding_multi_block_partial_out_size;
+        int64_t decoding_multi_block_partial_log_sum_exp_size;
         int64_t decoding_multi_block_counter_size;
 
-        int64_t temp_buffer_size;
-        void* temp_buffer;
+        int64_t workspace_size;
+        void *workspace;
     } cfg {0};
 
-    ppl::common::RetCode prepare(
-        const cudaStream_t stream,
+
+    // must call it before any forward
+    //
+    // remember to set workspace by workspace size after call it/before call forward
+    ppl::common::RetCode heuristic_prepare(
         const cudaDeviceProp& device_prop,
         const ppl::common::TensorShape* query_shape,
         const void* query, // (Sq, ..., D)
@@ -130,11 +131,26 @@ public:
         const ppl::common::TensorShape* output_shape,
         void* output); // (S, .., D)
 
+    // control some policy of decode
+    // it will recompute workspace_size
+    //
+    // should be called heuristic_prepare 
+    void manual_prepare_decode(
+        const bool force_sharemem_mhca,
+        const bool force_infinity_mhcq,
+        const bool force_infinity_gqcq,
+        const bool force_multi_block,
+        const bool force_threads_per_block,
+        const int32_t threads_per_block
+    );
+
+
     // per stage forward
     // kvstore must be the first stage 
     ppl::common::RetCode forward_kvstore(const cudaStream_t stream);
     ppl::common::RetCode forward_decode(const cudaStream_t stream);
     ppl::common::RetCode forward_prefill(const cudaStream_t stream);
+
 
     // all in one forward
     ppl::common::RetCode forward(const cudaStream_t stream);
