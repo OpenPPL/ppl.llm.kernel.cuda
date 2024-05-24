@@ -124,6 +124,7 @@ ppl::common::RetCode gemm(
         // is badly aligned, you can request more (e.g. 32) algos and try to run them one by one until something works
         CUBLAS_CHECK_RC(cublasLtMatmulAlgoGetHeuristic(cublaslt_handle,
             operationDesc, Bdesc, Adesc, Cdesc, Cdesc, preference, requested_algo, heuristicResult, &returnedResults));
+        CUBLAS_CHECK_RC(cublasLtMatmulPreferenceDestroy(preference));
     }
 
     CUBLAS_CHECK_RC(cublasLtMatmul(

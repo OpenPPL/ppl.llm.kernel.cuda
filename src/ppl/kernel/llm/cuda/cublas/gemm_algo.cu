@@ -118,6 +118,10 @@ std::pair<ppl::common::RetCode, cublasLtMatmulAlgo_t> find_best_algo(
 
             algo_results[algo_id].push_back(duration_ms);
         }
+
+        cudaEventDestroy(start_event);
+        cudaEventDestroy(stop_event);
+
         std::sort(algo_results[algo_id].begin(), algo_results[algo_id].end());
     }
 
@@ -134,6 +138,8 @@ std::pair<ppl::common::RetCode, cublasLtMatmulAlgo_t> find_best_algo(
             result = heuristic;
         }
     }
+
+    CUBLAS_CHECK_RC(cublasLtMatmulPreferenceDestroy(preference));
 
     return {best_time != INFINITY ? ppl::common::RC_SUCCESS : ppl::common::RC_NOT_FOUND, result.algo};
 }
