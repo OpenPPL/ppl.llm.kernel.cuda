@@ -30,6 +30,8 @@ namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pm
 
 static constexpr int32_t UNIFORM_PAGE_SIZE = 128;
 
+using decoding_algo = dynamic_batching_multi_head_cache_attention::decoding_algo;
+
 struct dynamic_batching_decoding_cache_attention_kernel_param {
     half* query;
     half* attn_mask;
@@ -1900,8 +1902,10 @@ ppl::common::RetCode dynamic_batching_decoding_cache_attention(
     const int32_t FULL_QUERY_GROUP  = 8;
 
     int64_t decoding_shm_size = 0;
+    int64_t query_group = cfg.num_heads;
     auto kernel_fn = dynamic_batching_decoding_cache_infinity_attention_fp16_kernel<HEAD_SIZE, THREAD_GROUP_SIZE, TPB, QUANT_GROUP, MULTI_BLOCK, ATTN_MASK, PAGE_SIZE>;
-    if (cfg.use_infinity_gqca) {
+    if (cfg.decoding_algo == decoding_algo::INFINITY_GQCA) {
+        query_group = (cfg.num_kv_repeats + FULL_QUERY_GROUP - 1) / FULL_QUERY_GROUP * (cfg.num_heads / cfg.num_kv_repeats);
         switch (cfg.num_kv_repeats) {
             case 4:
                 kernel_fn = dynamic_batching_decoding_group_query_cache_attention_fp16_kernel<HEAD_SIZE, TPB, QUANT_GROUP, 4, MULTI_BLOCK, ATTN_MASK, PAGE_SIZE>;
@@ -1919,9 +1923,9 @@ ppl::common::RetCode dynamic_batching_decoding_cache_attention(
                 LOG(ERROR) << "group query cache flash decoding attention do not support query group size " << cfg.num_kv_repeats;
                 return ppl::common::RC_UNSUPPORTED;
         }
-    } else if (cfg.use_infinity_mhca) {
+    } else if (cfg.decoding_algo == decoding_algo::INFINITY_MHCA) {
         kernel_fn = dynamic_batching_decoding_cache_infinity_attention_fp16_kernel<HEAD_SIZE, THREAD_GROUP_SIZE, TPB, QUANT_GROUP, MULTI_BLOCK, ATTN_MASK, PAGE_SIZE>;
-    } else {
+    } else if (cfg.decoding_algo == decoding_algo::SHAREMEM_MHCA) {
         kernel_fn = dynamic_batching_decoding_cache_sharemem_attention_fp16_kernel<HEAD_SIZE, THREAD_GROUP_SIZE, TPB, QUANT_GROUP, MULTI_BLOCK, ATTN_MASK, PAGE_SIZE>;
 
         const int32_t WARP_SIZE = 32;
@@ -1937,11 +1941,11 @@ ppl::common::RetCode dynamic_batching_decoding_cache_attention(
                 return ppl::common::RC_UNSUPPORTED;
             }
         }
+    } else {
+        LOG(ERROR) << "unknown decoding cache attention algo: " << cfg.decoding_algo;
+        return ppl::common::RC_INVALID_VALUE;
     }
 
-    int64_t query_group = cfg.use_infinity_gqca
-                ? (cfg.num_kv_repeats + FULL_QUERY_GROUP - 1) / FULL_QUERY_GROUP * (cfg.num_heads / cfg.num_kv_repeats)
-                : cfg.num_heads;
     const dim3 grid_size = {
         (unsigned int)query_group,
         (unsigned int)cfg.decoding_batches,

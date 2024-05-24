@@ -24,6 +24,15 @@ namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pm
 
 class dynamic_batching_multi_head_cache_attention {
 public:
+    typedef int32_t decoding_algo_t;
+
+    struct decoding_algo {
+        static const decoding_algo_t UNKNOWN = 0;
+        static const decoding_algo_t SHAREMEM_MHCA = 1;
+        static const decoding_algo_t INFINITY_MHCA = 2;
+        static const decoding_algo_t INFINITY_GQCA = 3;
+    };
+
     struct config {
         cudaDeviceProp* device_prop;
 
@@ -77,8 +86,7 @@ public:
 
         float attn_scale;
         int64_t num_kv_repeats;
-        bool use_infinity_mhca;
-        bool use_infinity_gqca;
+        decoding_algo_t decoding_algo;
 
         int64_t decoding_threads_per_block;
         int64_t decoding_multi_block_size;
@@ -126,24 +134,15 @@ public:
         const int64_t cache_stride_h,
         const int64_t cache_stride_kv,
         const int64_t cachestarts_stride_b,
+        const bool enable_sharemem_mhca,
+        const bool enable_infinity_mhca,
+        const bool enable_infinity_gqca,
+        const int32_t specify_decoding_multi_block, // 0 for off, 1 for heuristic, 2 for always on
+        const int32_t specify_decoding_tpb, // 0 for not specify, only accept 256,512
         void* cache, // int8 (S, L, 2, KVH, D), (L, KVH, S, 2, D)
         void* scale, // float16 (S, L, 2, KVH, D/8), (L, KVH, S, 2, D/8)
         const ppl::common::TensorShape* output_shape,
         void* output); // (S, .., D)
-
-    // control some policy of decode
-    // it will recompute workspace_size
-    //
-    // should be called heuristic_prepare 
-    void manual_prepare_decode(
-        const bool force_sharemem_mhca,
-        const bool force_infinity_mhcq,
-        const bool force_infinity_gqcq,
-        const bool force_multi_block,
-        const bool force_threads_per_block,
-        const int32_t threads_per_block
-    );
-
 
     // per stage forward
     // kvstore must be the first stage 
