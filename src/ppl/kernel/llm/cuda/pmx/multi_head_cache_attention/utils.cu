@@ -144,8 +144,18 @@ ppl::common::RetCode dynamic_batching_multi_head_cache_attention::heuristic_prep
     // LOL. e is a magic!!! I just want the curve be smoother.
     const int32_t kv_length_threshold = 512;
     const float kv_length_scale = std::max(
-        std::min(1.0f, expf(-1024.0f / max_kvlen + 1)), // scale for kvlen < 1024
-        logf(max_kvlen / 1024.0f)); // scale for kvlen >= 1024 * e
+        std::min(
+            1.0f,                               // scale for 1024 * e > kvlen > 1024
+            expf(-1024.0f / max_kvlen + 1)      // scale for 1024     > kvlen > 512
+        ),
+        (max_kvlen < 12288
+            ? (max_kvlen < 8192
+                ? logf(max_kvlen / 1024.0f)     // scale for 8192  > kvlen >= 1024 * e
+                : log2f(max_kvlen / 1024.0f)    // scale for 12288 > kvlen >= 8192
+              )
+            : max_kvlen / 2048.0f               // scale for 12288 > kvlen >= 8192
+        )
+    );
     const float multi_block_threshold = multi_processor_count * kv_length_scale;
 
     if (specify_decoding_multi_block < 0 || specify_decoding_multi_block > 2) {
@@ -187,7 +197,9 @@ ppl::common::RetCode dynamic_batching_multi_head_cache_attention::heuristic_prep
     } else {
         use_infinity_gqca = use_infinity_gqca && (mhca_total_blocks > multi_processor_count * 0.3f * mhca_multi_block_size);
     }
-    bool use_sharemem_mhca = !use_infinity_gqca;
+    // infinity_gqca has highest priority
+    bool use_sharemem_mhca = enable_sharemem_mhca && !use_infinity_gqca;
+    bool may_use_infinity_mhca = enable_infinity_mhca && !use_infinity_gqca;
     const int32_t decoding_total_blocks = (use_infinity_gqca ? gqca_total_blocks : mhca_total_blocks);
     const int32_t decoding_multi_block_size = (use_infinity_gqca ? gqca_multi_block_size : mhca_multi_block_size);
     
@@ -229,16 +241,21 @@ ppl::common::RetCode dynamic_batching_multi_head_cache_attention::heuristic_prep
 
     // Get decoding shared memory size
     bool use_infinity_mhca = false;
-    if (enable_infinity_mhca && decoding_batches > 0 && use_sharemem_mhca) {
-        const int64_t WPT = decoding_threads_per_block / WARP_SIZE;
-        const int64_t reduce_shm_size = decoding_threads_per_block / WARP_SIZE * sizeof(float);
-        const int64_t max_multi_block_kvlen =
-            (max_kvlen * sizeof(float) + decoding_multi_block_size - 1) / decoding_multi_block_size;
-        const int64_t logits_size = max(max_multi_block_kvlen, WPT * head_dim * sizeof(float));
-        const int64_t decoding_shm_size = reduce_shm_size + logits_size;
+    if (may_use_infinity_mhca && decoding_batches > 0) {
+        // sharemem_mhca has higher priority than infinity_mhca
+        if (use_sharemem_mhca) {
+            const int64_t WPT = decoding_threads_per_block / WARP_SIZE;
+            const int64_t reduce_shm_size = decoding_threads_per_block / WARP_SIZE * sizeof(float);
+            const int64_t max_multi_block_kvlen =
+                (max_kvlen * sizeof(float) + decoding_multi_block_size - 1) / decoding_multi_block_size;
+            const int64_t logits_size = max(max_multi_block_kvlen, WPT * head_dim * sizeof(float));
+            const int64_t decoding_shm_size = reduce_shm_size + logits_size;
 
-        // use infinity mhca when shm is not enough
-        use_infinity_mhca = decoding_shm_size > (int64_t)device_prop.sharedMemPerBlockOptin;
+            // use infinity mhca when shm is not enough
+            use_infinity_mhca = decoding_shm_size > (int64_t)device_prop.sharedMemPerBlockOptin;
+        } else {
+            use_infinity_mhca = true;
+        }
         if (use_infinity_mhca) {
             use_sharemem_mhca = false;
             decoding_threads_per_block = std::min<int64_t>(decoding_threads_per_block, 512);
