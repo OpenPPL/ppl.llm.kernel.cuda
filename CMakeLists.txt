@@ -4,6 +4,7 @@ project(ppl.llm.kernel.cuda)
 
 # options
 option(PPLNN_CUDA_ENABLE_NCCL "enable nccl" OFF)
+option(PPLNN_CUDA_ENABLE_CUDNN "enable cudnn, if it is disabled, some kernel will not work" OFF)
 option(PPLNN_INSTALL "" ON)
 option(PPLNN_CUDA_DISABLE_CONV_ALL "" ON)
 
@@ -38,10 +39,17 @@ endif()
 
 # --------------------------------------------------------------------------- #
 
-list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake/Modules)
-find_package(CUDNN QUIET)
-if(NOT CUDNN_FOUND)
-    message(FATAL_ERROR "cudnn is required.")
+if (PPLNN_CUDA_ENABLE_CUDNN)
+    list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake/Modules)
+    find_package(CUDNN QUIET)
+    if(NOT CUDNN_FOUND)
+        message(FATAL_ERROR "cudnn is required.")
+    endif()
+    list(APPEND PPLNN_CUDA_BINARY_DEFINITIONS PPLNN_CUDA_ENABLE_CUDNN)
+    list(APPEND PPLNN_CUDA_EXTERNAL_INCLUDE_DIRECTORIES ${CUDNN_INCLUDE_PATH})
+    list(APPEND PPLNN_CUDA_EXTERNAL_LINK_LIBRARIES ${CUDNN_LIBRARY})
+else()
+    message(WARNING "cudnn is disabled, some kernel will not avaliable.")
 endif()
 
 # --------------------------------------------------------------------------- #
@@ -86,9 +94,8 @@ set(__PPLNN_CUTLASS_INCLUDE_DIRECTORIES__
 list(APPEND PPLNN_CUDA_EXTERNAL_INCLUDE_DIRECTORIES ${__PPLNN_CUTLASS_INCLUDE_DIRECTORIES__})
 unset(__CUTLASS_SOURCE_DIR__)
 unset(__PPLNN_CUTLASS_INCLUDE_DIRECTORIES__)
-list(APPEND PPLNN_CUDA_EXTERNAL_INCLUDE_DIRECTORIES ${CUDNN_INCLUDE_PATH})
 
-list(APPEND PPLNN_CUDA_EXTERNAL_LINK_LIBRARIES cublasLt ${CUDNN_LIBRARY})
+list(APPEND PPLNN_CUDA_EXTERNAL_LINK_LIBRARIES cublasLt)
 
 set(PPLNN_CUDA_KERNEL_COMMON_NVCC_FLAGS "${PPLNN_CUDA_KERNEL_COMMON_NVCC_FLAGS} --expt-relaxed-constexpr")
 

@@ -18,6 +18,8 @@
 #ifndef __PPL_KERNEL_LLM_CUDA_PMX_VISION_EMBEDDING_H__
 #define __PPL_KERNEL_LLM_CUDA_PMX_VISION_EMBEDDING_H__
 
+#ifdef PPLNN_CUDA_ENABLE_CUDNN
+
 #include <cudnn.h>
 
 #include "ppl/kernel/llm/cuda/common/general_include.h"
@@ -60,5 +62,7 @@ ppl::common::RetCode vision_embedding_postprocessing(
     vision_embedding_config& config);
 
 }}}}}
+
+#endif
 
 #endif
