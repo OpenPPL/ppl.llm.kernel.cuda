@@ -47,8 +47,8 @@ void minmax_dequantize_split3_fp16_kernel(
     minmax_dequantize_split3_fp16_kernel_param p
 )
 {
-    const int64_t batch_id = blockIdx.y;
-    const int64_t tile_id  = blockIdx.x;
+    const int64_t batch_id = blockIdx.x;
+    const int64_t tile_id  = blockIdx.y;
     const int64_t tile_offset = tile_id * TPB * VPT;
 
     if (tile_offset + threadIdx.x * VPT < p.quant_dim) {
@@ -105,8 +105,8 @@ ppl::common::RetCode minmax_dequantize_split3_fp16(
     constexpr int32_t TPB = 256;
     constexpr int32_t VPT = 4;
     const dim3 block_grid {
-        (unsigned int)ceilf(float(quant_dim) / (TPB * VPT)),
         (unsigned int)batch,
+        (unsigned int)ceilf(float(quant_dim) / (TPB * VPT)),
         1
     };
 
