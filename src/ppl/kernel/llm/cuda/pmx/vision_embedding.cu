@@ -15,6 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#ifdef PPLNN_CUDA_ENABLE_CUDNN
+
 #include "ppl/kernel/llm/cuda/pmx/vision_embedding.h"
 #include "ppl/common/log.h"
 
@@ -278,3 +280,5 @@ ppl::common::RetCode vision_embedding_postprocessing(
 }
 
 }}}}}
+
+#endif
