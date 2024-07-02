@@ -208,7 +208,8 @@ void sample_topk_topp_default_kernel(
     const fp32_t top_p_val,
     const fp32_t rnd_val,
     fp32_t *padded_logits,                  // [num_batches, padded_vocab_size]
-    int32_t *output)                        // [num_batches, 1])
+    int32_t *output,                        // [num_batches, 1])
+    float *logprobs)                        // [num_batches, 1])
 {
     constexpr int32_t WARP_SIZE = 32;
     constexpr int32_t WPT = TPB / WARP_SIZE; // warp per thread block.
@@ -255,6 +256,9 @@ void sample_topk_topp_default_kernel(
     if (local_top_p == 0.f) {
         if (threadIdx.x == 0) {
             output[batch_id] = max_idx;
+            if (logprobs) {
+                logprobs[batch_id] = max_val;
+            }
         }
     } else {
         if (threadIdx.x == 0) {
@@ -302,6 +306,9 @@ void sample_topk_topp_default_kernel(
 
         if (threadIdx.x == min(TPB - count, TPB - 1)) {
             output[batch_id] = topk_idxs[threadIdx.x];
+            if (logprobs) {
+                logprobs[batch_id] = logits[batch_offset + topk_idxs[threadIdx.x]];
+            }
         }
     }
 }
@@ -319,7 +326,8 @@ void sample_topk_topp_radix_select_kernel(
     const int32_t top_k_val,
     const fp32_t top_p_val,
     const fp32_t rnd_val,
-    int32_t *output)                        // [num_batches, 1])
+    int32_t *output,
+    float *logprobs)                        // [num_batches, 1])
 {
     constexpr int32_t WARP_SIZE = 32;
     constexpr int32_t WPT = TPB / WARP_SIZE; // warp per thread block.
@@ -369,6 +377,9 @@ void sample_topk_topp_radix_select_kernel(
     if (local_top_p == 0.f) {
         if (threadIdx.x == 0) {
             output[batch_id] = local_idxs[0];
+            if (logprobs) {
+                logprobs[batch_id] = local_vals[0];
+            }
         }
     } else {
         if (threadIdx.x == 0) {
@@ -397,20 +408,24 @@ void sample_topk_topp_radix_select_kernel(
         fp32_t prob_sum = 0.f;
         int32_t count = 0;
         int32_t select_idx;
-
+        float select_prob;
         for (int32_t i = 0; i < KPT; i++) {
             int32_t top_idx = threadIdx.x + i * TPB;
             fp32_t prob = (top_idx < top_k_val) ? local_vals[i] * local_sum : 1.f;
             BlockScan(scan_storage).InclusiveSum(prob, prob_sum, prefix_op);
             count = __syncthreads_count((int32_t)(prob_sum >= top_p_selection));
-            select_idx = local_idxs[i];
             if (count != 0) {
+                select_idx = local_idxs[i];
+                select_prob = local_vals[i];
                 break;
             }
         }
 
         if (threadIdx.x == min(TPB - count, TPB - 1)) {
             output[batch_id] = select_idx;
+            if (logprobs) {
+                logprobs[batch_id] = select_prob;
+            }
         }
     }
 }
@@ -591,7 +606,8 @@ void sample_argmax_kernel(
     const fp32_t* __restrict__ logits, // [batch, batch_stride]
     const int32_t vocab_size,
     const int32_t batch_stride,
-    int32_t* output)                   // [batch, 1]
+    int32_t* output, // [batch, 1]
+    float* logprobs) // [batch, 1]
 {
     const int64_t batch_id = blockIdx.x;
     int32_t selection_idx = 0;
@@ -615,8 +631,12 @@ void sample_argmax_kernel(
     __syncthreads();
 
     SortingPair p = sample_block_reduce_max_with_index<WPT>(selecting_value, threadIdx.x, red_smem);
-    if (threadIdx.x == 0)
+    if (threadIdx.x == 0) {
         output[batch_id] = buffer[p.index];
+        if (logprobs) {
+            logprobs[batch_id] = p.value;
+        }
+    }
 }
 
 int64_t flash_sample_top_p_get_workspace_size(
@@ -703,7 +723,8 @@ ppl::common::RetCode sample_topk_topp(
     const float top_p_val,
     const float rnd_val,
     void *workspace,
-    int32_t* output) // (batch)
+    int32_t* output, // (batch)
+    float *logprobs) // (batch)
 {
     constexpr int32_t TPB = 256;
     constexpr int32_t VPT = 4;
@@ -714,7 +735,7 @@ ppl::common::RetCode sample_topk_topp(
     if (top_k_val == 1 || (!top_p && top_p_val == 0.0f)) {
         sample_argmax_kernel<TPB>
         <<<num_batches, TPB, 0, stream>>>(
-            logits, vocab_size, batch_stride, output
+            logits, vocab_size, batch_stride, output, logprobs
         );
     } else if (top_k_val <= 12) {
         sample_topk_topp_default_kernel<TPB, VPT>
@@ -722,7 +743,7 @@ ppl::common::RetCode sample_topk_topp(
             logits, temperatures, top_p, rnd,
             vocab_size, batch_stride,
             top_k_val, top_p_val, rnd_val,
-            padded_logits, output
+            padded_logits, output, logprobs
         );
     } else if (top_k_val <= 256) {
         sample_topk_topp_radix_select_kernel<TPB, LPT, 1>
@@ -730,7 +751,7 @@ ppl::common::RetCode sample_topk_topp(
             logits, temperatures, top_p, rnd,
             vocab_size, batch_stride,
             top_k_val, top_p_val, rnd_val,
-            output
+            output, logprobs
         );
     } else if (top_k_val <= 512) {
         sample_topk_topp_radix_select_kernel<TPB, LPT, 2>
@@ -738,7 +759,7 @@ ppl::common::RetCode sample_topk_topp(
             logits, temperatures, top_p, rnd,
             vocab_size, batch_stride,
             top_k_val, top_p_val, rnd_val,
-            output
+            output, logprobs
         );
     } else if (top_k_val <= 768) {
         sample_topk_topp_radix_select_kernel<TPB, LPT, 3>
@@ -746,7 +767,7 @@ ppl::common::RetCode sample_topk_topp(
             logits, temperatures, top_p, rnd,
             vocab_size, batch_stride,
             top_k_val, top_p_val, rnd_val,
-            output
+            output, logprobs
         );
     } else if (top_k_val <= 1024) {
         sample_topk_topp_radix_select_kernel<TPB, LPT, 4>
@@ -754,7 +775,7 @@ ppl::common::RetCode sample_topk_topp(
             logits, temperatures, top_p, rnd,
             vocab_size, batch_stride,
             top_k_val, top_p_val, rnd_val,
-            output
+            output, logprobs
         );
     } else {
         LOG(ERROR) << "only supporte top_k <= 1024, top_k = " << top_k_val;
@@ -772,7 +793,7 @@ ppl::common::RetCode sample_argmax(
     const int32_t batch_stride,
     int32_t* output) // (batch)
 {
-    sample_argmax_kernel<256><<<num_batches, 256, 0, stream>>>(logits, vocab_size, batch_stride, output);
+    sample_argmax_kernel<256><<<num_batches, 256, 0, stream>>>(logits, vocab_size, batch_stride, output, nullptr);
 
     return ppl::common::RC_SUCCESS;
 }

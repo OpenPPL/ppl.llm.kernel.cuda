@@ -58,7 +58,8 @@ ppl::common::RetCode sample_topk_topp(
     const float top_p_val,
     const float rnd_val,
     void *workspace,
-    int32_t* output);
+    int32_t* output,
+    float* logprobs);
 
 ppl::common::RetCode sample_argmax(
     cudaStream_t stream,
