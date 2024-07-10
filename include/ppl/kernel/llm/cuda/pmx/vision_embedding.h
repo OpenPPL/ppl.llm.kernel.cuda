@@ -33,6 +33,7 @@ struct vision_embedding_config {
     int32_t image_size;
     int32_t patch_size;
     int32_t grid;
+    int32_t bias_term;
     size_t total_buffer_size;
     size_t conv_workspace_size;
     size_t patch_embeds_size;
@@ -43,6 +44,7 @@ struct vision_embedding_config {
     cudnnTensorDescriptor_t patch_nchw_desc;
     cudnnTensorDescriptor_t patch_nhwc_desc;
     cudnnFilterDescriptor_t filter_desc;
+    cudnnTensorDescriptor_t bias_desc;
     cudnnConvolutionDescriptor_t conv_desc;
 };
 
@@ -53,9 +55,10 @@ ppl::common::RetCode vision_embedding(
     const cudaStream_t stream,
     vision_embedding_config& config,
     const void* images,
-    const void* patch_emb_weight,
-    const void* cls_emb_weight,
-    const void* pos_emb_weight,
+    const void* patch_weight,
+    const void* patch_bias,
+    const void* class_weight,
+    const void* position_weight,
     void* output);
 
 ppl::common::RetCode vision_embedding_postprocessing(
