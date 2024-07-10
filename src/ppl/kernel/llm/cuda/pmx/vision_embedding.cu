@@ -26,8 +26,8 @@ namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pm
 
 __global__ void input_embedding_small_dims_kernel_fp16(
     const half* patch_embeds,
-    const half* cls_emb_weight,
-    const half* pos_emb_weight,
+    const half* class_weight,
+    const half* position_weight,
     int32_t hidden_dim,
     half* output)
 {
@@ -39,7 +39,7 @@ __global__ void input_embedding_small_dims_kernel_fp16(
     half patch_value;
     int32_t index;
     if (blockIdx.x == 0) {  // cls
-        patch_value = cls_emb_weight[thread_id];
+        patch_value = class_weight[thread_id];
     }
     else {                  // patch
         index = (blockIdx.y * (gridDim.x - 1) + (blockIdx.x - 1)) * hidden_dim + thread_id;
@@ -47,7 +47,7 @@ __global__ void input_embedding_small_dims_kernel_fp16(
     }
 
     int32_t position_index = blockIdx.x * hidden_dim + thread_id;
-    half position_value = pos_emb_weight[position_index];
+    half position_value = position_weight[position_index];
     half value = position_value + patch_value;
 
     index = (blockIdx.y * gridDim.x + blockIdx.x) * hidden_dim + thread_id;
@@ -56,8 +56,8 @@ __global__ void input_embedding_small_dims_kernel_fp16(
 
 __global__ void input_embedding_kernel_fp16(
     const half* patch_embeds,
-    const half* cls_emb_weight,
-    const half* pos_emb_weight,
+    const half* class_weight,
+    const half* position_weight,
     int32_t hidden_dim,
     half* output)
 {
@@ -69,7 +69,7 @@ __global__ void input_embedding_kernel_fp16(
     half patch_value;
     int32_t index;
     if (blockIdx.y == 0) {  // cls
-        patch_value = cls_emb_weight[thread_id];
+        patch_value = class_weight[thread_id];
     }
     else {                  // patch
         index = (blockIdx.z * (blockDim.y - 1) + (blockIdx.y - 1)) * hidden_dim + thread_id;
@@ -77,7 +77,7 @@ __global__ void input_embedding_kernel_fp16(
     }
 
     int32_t position_index = blockIdx.y * hidden_dim + thread_id;
-    half position_value = pos_emb_weight[position_index];
+    half position_value = position_weight[position_index];
     half value = position_value + patch_value;
 
     index = (blockIdx.z * gridDim.y + blockIdx.y) * hidden_dim + thread_id;
@@ -86,8 +86,8 @@ __global__ void input_embedding_kernel_fp16(
 
 void combine_embedding(
     const half* patch_embeds,    // [batch_size, grid * grid, hidden_dim]
-    const half* cls_emb_weight,  // [hidden_dim]
-    const half* pos_emb_weight,  // [num_positions, hidden_dim]
+    const half* class_weight,  // [hidden_dim]
+    const half* position_weight,  // [num_positions, hidden_dim]
     int32_t batch_size,
     int32_t num_positions,
     int32_t hidden_dim,
@@ -112,16 +112,16 @@ void combine_embedding(
         else {
             block.x = 1024;
         }
-        input_embedding_small_dims_kernel_fp16<<<grid, block>>>(patch_embeds, cls_emb_weight,
-            pos_emb_weight, hidden_dim, output);
+        input_embedding_small_dims_kernel_fp16<<<grid, block>>>(patch_embeds, class_weight,
+            position_weight, hidden_dim, output);
     }
     else {
         block.x = 1024;
         grid.x = (hidden_dim + 1023) >> 10;
         grid.y = num_positions;
         grid.z = batch_size;
-        input_embedding_kernel_fp16<<<grid, block>>>(patch_embeds, cls_emb_weight,
-            pos_emb_weight, hidden_dim, output);
+        input_embedding_kernel_fp16<<<grid, block>>>(patch_embeds, class_weight,
+            position_weight, hidden_dim, output);
     }
 }
 
@@ -175,6 +175,10 @@ ppl::common::RetCode vision_embedding_preprocessing(
         return ppl::common::RC_OTHER_ERROR;
     }
 
+    if (config.bias_term) {
+        // TODO: create bias desc
+    }
+
     config.cudnn_status = cudnnCreateConvolutionDescriptor(&config.conv_desc);
     if (config.cudnn_status != CUDNN_STATUS_SUCCESS) {
         LOG(ERROR) << "failed to create the convolution descriptor with error: " << cudnnGetErrorString(config.cudnn_status);
@@ -212,36 +216,43 @@ ppl::common::RetCode vision_embedding(
     const cudaStream_t stream,
     vision_embedding_config& config,
     const void* images,
-    const void* patch_emb_weight,  // [hidden_dim, channels, patch_size, patch_size]
-    const void* cls_emb_weight,    // [hidden_dim]
-    const void* pos_emb_weight,    // [num_positions, hidden_dim]
+    const void* patch_weight,  // [hidden_dim, channels, patch_size, patch_size]
+    const void* patch_bias,    // [hidden_dim]
+    const void* class_weight,    // [hidden_dim]
+    const void* position_weight,    // [num_positions, hidden_dim]
     void* output)
 {
     void* patch_embeds_nchw = config.buffer_addr;
     void* patch_embeds_nhwc = patch_embeds_nchw + config.patch_embeds_size;
     void* conv_workspace = patch_embeds_nhwc + config.patch_embeds_size;
 
-    float alpha = 1.f;
-    float beta = 1.f;
-    config.cudnn_status = cudnnConvolutionForward(config.cudnn_handle, &alpha, config.image_desc,
-                          images, config.filter_desc, patch_emb_weight, config.conv_desc,
-                          CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_PRECOMP_GEMM, conv_workspace,
-                          config.conv_workspace_size, &beta, config.patch_nchw_desc, patch_embeds_nchw);
-    if (config.cudnn_status != CUDNN_STATUS_SUCCESS) {
-        LOG(ERROR) << "failed to execute convolution with error: " << cudnnGetErrorString(config.cudnn_status);
-        return ppl::common::RC_OTHER_ERROR;
-    }
+    if (config.bias_term) {
+        // TODO: call cudnn bias conv here
+        LOG(ERROR) << "currently do not suppoort conv bias";
+        return ppl::common::RC_UNSUPPORTED;
+    } else {
+        float alpha = 1.f;
+        float beta = 1.f;
+        config.cudnn_status = cudnnConvolutionForward(config.cudnn_handle, &alpha, config.image_desc,
+                            images, config.filter_desc, patch_weight, config.conv_desc,
+                            CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_PRECOMP_GEMM, conv_workspace,
+                            config.conv_workspace_size, &beta, config.patch_nchw_desc, patch_embeds_nchw);
+        if (config.cudnn_status != CUDNN_STATUS_SUCCESS) {
+            LOG(ERROR) << "failed to execute convolution with error: " << cudnnGetErrorString(config.cudnn_status);
+            return ppl::common::RC_OTHER_ERROR;
+        }
 
-    config.cudnn_status = cudnnTransformTensor(config.cudnn_handle, &alpha, config.patch_nchw_desc,
-                          patch_embeds_nchw, &beta, config.patch_nhwc_desc, patch_embeds_nhwc);
-    if (config.cudnn_status != CUDNN_STATUS_SUCCESS) {
-        LOG(ERROR) << "failed to transpose convolution output with error: " << cudnnGetErrorString(config.cudnn_status);
-        return ppl::common::RC_OTHER_ERROR;
+        config.cudnn_status = cudnnTransformTensor(config.cudnn_handle, &alpha, config.patch_nchw_desc,
+                            patch_embeds_nchw, &beta, config.patch_nhwc_desc, patch_embeds_nhwc);
+        if (config.cudnn_status != CUDNN_STATUS_SUCCESS) {
+            LOG(ERROR) << "failed to transpose convolution output with error: " << cudnnGetErrorString(config.cudnn_status);
+            return ppl::common::RC_OTHER_ERROR;
+        }
     }
 
     int32_t num_positions = config.grid * config.grid + 1;
-    combine_embedding((const half*)patch_embeds_nhwc, (const half*)cls_emb_weight,
-                      (const half*)pos_emb_weight, config.batch_size,
+    combine_embedding((const half*)patch_embeds_nhwc, (const half*)class_weight,
+                      (const half*)position_weight, config.batch_size,
                       num_positions, config.hidden_dim, (half*)output);
 
     return ppl::common::RC_SUCCESS;
