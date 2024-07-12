@@ -55,6 +55,8 @@ ppl::common::RetCode row_parallel_linear(
     const int64_t N = out_features;
     const int64_t Kw = in_features / nccl_param->size;
 
+    const void* reduce_bias = nccl_param->rank == 0 ? bias : nullptr;
+
     ppl::common::RetCode status;
 
     status = ppl::kernel::llm::cuda::cublas::gemm(
@@ -69,7 +71,7 @@ ppl::common::RetCode row_parallel_linear(
         Kw,
         weight_shape->GetDataType(),
         weight,
-        bias,
+        reduce_bias,
         M,
         N,
         Kw,

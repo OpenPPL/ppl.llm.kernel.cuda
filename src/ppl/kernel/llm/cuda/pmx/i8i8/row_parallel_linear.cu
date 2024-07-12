@@ -81,6 +81,8 @@ ppl::common::RetCode row_parallel_linear(
     const int64_t N = out_features;
     const int64_t Kw = in_features / nccl_param->size;
 
+    const void* reduce_bias = nccl_param->rank == 0 ? bias : nullptr;
+
     ppl::common::RetCode status = ppl::common::RC_SUCCESS;
 
     // LOG(ERROR) << "M" << M << ", N" << N << ", K" << Kw;
@@ -129,7 +131,7 @@ ppl::common::RetCode row_parallel_linear(
     status = ppl::kernel::llm::cuda::pmx::i8i8::minmax_dequantize_fp16(
         stream,
         quant_buffer,
-        bias,
+        reduce_bias,
         scale_M,
         scale_N,
         M,
