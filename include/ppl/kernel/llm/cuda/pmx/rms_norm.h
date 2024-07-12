@@ -22,17 +22,16 @@
 
 namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace pmx {
 
-ppl::common::RetCode rms_norm(
-    cudaStream_t stream,
-    const ppl::common::TensorShape* input_shape,
+ppl::common::RetCode rms_norm_fp16(
+    const cudaStream_t stream,
     const void* input,
-    const void* skip_in,
     const void* weight,
-    const int32_t axis,
+    const void* skip,
     const float eps,
-    const bool skip_term,
-    void* output,
-    void* skip_out);
+    const int64_t batch,
+    const int64_t normalize_shape,
+    void* skip_out,
+    void* output);
 
 }}}}}
 
