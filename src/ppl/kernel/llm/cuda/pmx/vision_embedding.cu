@@ -85,8 +85,8 @@ __global__ void input_embedding_kernel_fp16(
 }
 
 void combine_embedding(
-    const half* patch_embeds,    // [batch_size, grid * grid, hidden_dim]
-    const half* class_weight,  // [hidden_dim]
+    const half* patch_embeds,     // [batch_size, grid * grid, hidden_dim]
+    const half* class_weight,     // [hidden_dim]
     const half* position_weight,  // [num_positions, hidden_dim]
     int32_t batch_size,
     int32_t num_positions,
@@ -176,7 +176,28 @@ ppl::common::RetCode vision_embedding_preprocessing(
     }
 
     if (config.bias_term) {
-        // TODO: create bias desc
+        config.cudnn_status = cudnnCreateTensorDescriptor(&config.bias_desc);
+        if (config.cudnn_status != CUDNN_STATUS_SUCCESS) {
+            LOG(ERROR) << "failed to create the tensor descriptor of the convolution bias with error: " << cudnnGetErrorString(config.cudnn_status);
+            return ppl::common::RC_OTHER_ERROR;
+        }
+        config.cudnn_status = cudnnSetTensor4dDescriptor(config.bias_desc, CUDNN_TENSOR_NCHW,
+                CUDNN_DATA_HALF, 1, config.hidden_dim, 1, 1);
+        if (config.cudnn_status != CUDNN_STATUS_SUCCESS) {
+            LOG(ERROR) << "failed to set the tensor descriptor of the convolution bias with error: " << cudnnGetErrorString(config.cudnn_status);
+            return ppl::common::RC_OTHER_ERROR;
+        }
+        config.cudnn_status = cudnnCreateActivationDescriptor(&config.act_desc);
+        if (config.cudnn_status != CUDNN_STATUS_SUCCESS) {
+            LOG(ERROR) << "failed to create the activation descriptor of the convolution with error: " << cudnnGetErrorString(config.cudnn_status);
+            return ppl::common::RC_OTHER_ERROR;
+        }
+        config.cudnn_status = cudnnSetActivationDescriptor(config.act_desc, CUDNN_ACTIVATION_IDENTITY,
+                CUDNN_NOT_PROPAGATE_NAN, 0.f);
+        if (config.cudnn_status != CUDNN_STATUS_SUCCESS) {
+            LOG(ERROR) << "failed to set the activation descriptor of the convolution with error: " << cudnnGetErrorString(config.cudnn_status);
+            return ppl::common::RC_OTHER_ERROR;
+        }
     }
 
     config.cudnn_status = cudnnCreateConvolutionDescriptor(&config.conv_desc);
@@ -215,45 +236,52 @@ ppl::common::RetCode vision_embedding_preprocessing(
 ppl::common::RetCode vision_embedding(
     const cudaStream_t stream,
     vision_embedding_config& config,
-    const void* images,
-    const void* patch_weight,  // [hidden_dim, channels, patch_size, patch_size]
-    const void* patch_bias,    // [hidden_dim]
+    const void* pixel_values,    // [batch_size, image_channel, image_size, image_size]
     const void* class_weight,    // [hidden_dim]
-    const void* position_weight,    // [num_positions, hidden_dim]
-    void* output)
+    const void* patch_weight,    // [hidden_dim, channels, patch_size, patch_size]
+    const void* position_weight, // [num_positions, hidden_dim]
+    const void* patch_bias,      // [hidden_dim]
+    void* output_embeddings)     // [batch_size, grid*grid + 1, hidden_dim]
 {
     void* patch_embeds_nchw = config.buffer_addr;
     void* patch_embeds_nhwc = patch_embeds_nchw + config.patch_embeds_size;
     void* conv_workspace = patch_embeds_nhwc + config.patch_embeds_size;
 
+    float alpha = 1.f;
+    float beta = 1.f;
     if (config.bias_term) {
-        // TODO: call cudnn bias conv here
-        LOG(ERROR) << "currently do not suppoort conv bias";
-        return ppl::common::RC_UNSUPPORTED;
+        float alpha1 = 1.f;
+        float alpha2 = 0.f;
+        config.cudnn_status = cudnnConvolutionBiasActivationForward(config.cudnn_handle, &alpha1, config.image_desc,
+                            pixel_values, config.filter_desc, patch_weight, config.conv_desc,
+                            CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_PRECOMP_GEMM, conv_workspace,
+                            config.conv_workspace_size, &alpha2, config.patch_nchw_desc, patch_embeds_nchw, config.bias_desc, patch_bias, config.act_desc, config.patch_nchw_desc, patch_embeds_nchw);
+        if (config.cudnn_status != CUDNN_STATUS_SUCCESS) {
+            LOG(ERROR) << "failed to execute convolution with bias with error: " << cudnnGetErrorString(config.cudnn_status);
+            return ppl::common::RC_OTHER_ERROR;
+        }
+
     } else {
-        float alpha = 1.f;
-        float beta = 1.f;
         config.cudnn_status = cudnnConvolutionForward(config.cudnn_handle, &alpha, config.image_desc,
-                            images, config.filter_desc, patch_weight, config.conv_desc,
+                            pixel_values, config.filter_desc, patch_weight, config.conv_desc,
                             CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_PRECOMP_GEMM, conv_workspace,
                             config.conv_workspace_size, &beta, config.patch_nchw_desc, patch_embeds_nchw);
         if (config.cudnn_status != CUDNN_STATUS_SUCCESS) {
             LOG(ERROR) << "failed to execute convolution with error: " << cudnnGetErrorString(config.cudnn_status);
             return ppl::common::RC_OTHER_ERROR;
         }
-
-        config.cudnn_status = cudnnTransformTensor(config.cudnn_handle, &alpha, config.patch_nchw_desc,
-                            patch_embeds_nchw, &beta, config.patch_nhwc_desc, patch_embeds_nhwc);
-        if (config.cudnn_status != CUDNN_STATUS_SUCCESS) {
-            LOG(ERROR) << "failed to transpose convolution output with error: " << cudnnGetErrorString(config.cudnn_status);
-            return ppl::common::RC_OTHER_ERROR;
-        }
+    }
+    config.cudnn_status = cudnnTransformTensor(config.cudnn_handle, &alpha, config.patch_nchw_desc,
+                        patch_embeds_nchw, &beta, config.patch_nhwc_desc, patch_embeds_nhwc);
+    if (config.cudnn_status != CUDNN_STATUS_SUCCESS) {
+        LOG(ERROR) << "failed to transpose the convolution output with error: " << cudnnGetErrorString(config.cudnn_status);
+        return ppl::common::RC_OTHER_ERROR;
     }
 
     int32_t num_positions = config.grid * config.grid + 1;
     combine_embedding((const half*)patch_embeds_nhwc, (const half*)class_weight,
                       (const half*)position_weight, config.batch_size,
-                      num_positions, config.hidden_dim, (half*)output);
+                      num_positions, config.hidden_dim, (half*)output_embeddings);
 
     return ppl::common::RC_SUCCESS;
 }
@@ -263,27 +291,40 @@ ppl::common::RetCode vision_embedding_postprocessing(
 {
     config.cudnn_status = cudnnDestroyTensorDescriptor(config.image_desc);
     if (config.cudnn_status != CUDNN_STATUS_SUCCESS) {
-        LOG(ERROR) << "failed to destroy the cudnn tensor descriptor of the image with error: " << cudnnGetErrorString(config.cudnn_status);
+        LOG(ERROR) << "failed to destroy the tensor descriptor of the image with error: " << cudnnGetErrorString(config.cudnn_status);
         return ppl::common::RC_OTHER_ERROR;
     }
     config.cudnn_status = cudnnDestroyTensorDescriptor(config.patch_nchw_desc);
     if (config.cudnn_status != CUDNN_STATUS_SUCCESS) {
-        LOG(ERROR) << "failed to destroy the cudnn tensor descriptor of the convolution output with error: " << cudnnGetErrorString(config.cudnn_status);
+        LOG(ERROR) << "failed to destroy the tensor descriptor of the convolution output with error: " << cudnnGetErrorString(config.cudnn_status);
         return ppl::common::RC_OTHER_ERROR;
     }
     config.cudnn_status = cudnnDestroyTensorDescriptor(config.patch_nhwc_desc);
     if (config.cudnn_status != CUDNN_STATUS_SUCCESS) {
-        LOG(ERROR) << "failed to destroy the cudnn tensor descriptor of the transposed convolution output with error: " << cudnnGetErrorString(config.cudnn_status);
+        LOG(ERROR) << "failed to destroy the tensor descriptor of the transposed convolution output with error: " << cudnnGetErrorString(config.cudnn_status);
         return ppl::common::RC_OTHER_ERROR;
+    }
+    if (config.bias_term) {
+        config.cudnn_status = cudnnDestroyTensorDescriptor(config.bias_desc);
+        if (config.cudnn_status != CUDNN_STATUS_SUCCESS) {
+            LOG(ERROR) << "failed to destroy the tensor descriptor of the convolution bias with error: " << cudnnGetErrorString(config.cudnn_status);
+            return ppl::common::RC_OTHER_ERROR;
+        }
+        config.cudnn_status = cudnnDestroyActivationDescriptor(config.act_desc);
+        if (config.cudnn_status != CUDNN_STATUS_SUCCESS) {
+            LOG(ERROR) << "failed to destroy the activation descriptor of the convolution with error: " << cudnnGetErrorString(config.cudnn_status);
+            return ppl::common::RC_OTHER_ERROR;
+        }
+
     }
     config.cudnn_status = cudnnDestroyFilterDescriptor(config.filter_desc);
     if (config.cudnn_status != CUDNN_STATUS_SUCCESS) {
-        LOG(ERROR) << "failed to destroy the cudnn filter descriptor with error: " << cudnnGetErrorString(config.cudnn_status);
+        LOG(ERROR) << "failed to destroy the filter descriptor with error: " << cudnnGetErrorString(config.cudnn_status);
         return ppl::common::RC_OTHER_ERROR;
     }
     config.cudnn_status = cudnnDestroyConvolutionDescriptor(config.conv_desc);
     if (config.cudnn_status != CUDNN_STATUS_SUCCESS) {
-        LOG(ERROR) << "failed to destroy the cudnn convolution descriptor with error: " << cudnnGetErrorString(config.cudnn_status);
+        LOG(ERROR) << "failed to destroy the convolution descriptor with error: " << cudnnGetErrorString(config.cudnn_status);
         return ppl::common::RC_OTHER_ERROR;
     }
 
