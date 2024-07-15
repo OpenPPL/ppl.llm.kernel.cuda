@@ -54,12 +54,12 @@ ppl::common::RetCode vision_embedding_preprocessing(
 ppl::common::RetCode vision_embedding(
     const cudaStream_t stream,
     vision_embedding_config& config,
-    const void* images,
-    const void* patch_weight,
-    const void* patch_bias,
+    const void* pixel_values,
     const void* class_weight,
+    const void* patch_weight,
     const void* position_weight,
-    void* output);
+    const void* patch_bias,
+    void* output_embeddings);
 
 ppl::common::RetCode vision_embedding_postprocessing(
     vision_embedding_config& config);
