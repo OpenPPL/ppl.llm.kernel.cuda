@@ -48,7 +48,7 @@ public:
         void* cachestarts;
         void* start_pos;
         void* alibi_slopes;
-        
+
         void* cache;
         void* scale;
 
@@ -96,6 +96,8 @@ public:
 
         int64_t workspace_size;
         void *workspace;
+
+        bool enable_cache_prefill;
     } cfg {0};
 
 
@@ -134,6 +136,7 @@ public:
         const int64_t cache_stride_h,
         const int64_t cache_stride_kv,
         const int64_t cachestarts_stride_b,
+        const bool enable_cache_prefill,
         const bool enable_sharemem_mhca,
         const bool enable_infinity_mhca,
         const bool enable_infinity_gqca,
@@ -145,7 +148,7 @@ public:
         void* output); // (S, .., D)
 
     // per stage forward
-    // kvstore must be the first stage 
+    // kvstore must be the first stage
     ppl::common::RetCode forward_kvstore(const cudaStream_t stream);
     ppl::common::RetCode forward_decode(const cudaStream_t stream);
     ppl::common::RetCode forward_prefill(const cudaStream_t stream);

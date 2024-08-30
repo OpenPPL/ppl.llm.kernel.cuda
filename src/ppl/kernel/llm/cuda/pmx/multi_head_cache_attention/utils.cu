@@ -54,6 +54,7 @@ ppl::common::RetCode dynamic_batching_multi_head_cache_attention::heuristic_prep
     const int64_t cache_stride_h,
     const int64_t cache_stride_kv,
     const int64_t cachestarts_stride_b,
+    const bool enable_cache_prefill,
     const bool enable_sharemem_mhca,
     const bool enable_infinity_mhca,
     const bool enable_infinity_gqca,
@@ -202,7 +203,7 @@ ppl::common::RetCode dynamic_batching_multi_head_cache_attention::heuristic_prep
     bool may_use_infinity_mhca = enable_infinity_mhca && !use_infinity_gqca;
     const int32_t decoding_total_blocks = (use_infinity_gqca ? gqca_total_blocks : mhca_total_blocks);
     const int32_t decoding_multi_block_size = (use_infinity_gqca ? gqca_multi_block_size : mhca_multi_block_size);
-    
+
 
     // Get TPB by decoding_total_blocks
     int32_t decoding_threads_per_block = TPB;
@@ -340,6 +341,8 @@ ppl::common::RetCode dynamic_batching_multi_head_cache_attention::heuristic_prep
         = cfg.decoding_multi_block_partial_out_size
         + cfg.decoding_multi_block_partial_log_sum_exp_size
         + cfg.decoding_multi_block_counter_size;
+
+    cfg.enable_cache_prefill = enable_cache_prefill;
 
     return ppl::common::RC_SUCCESS;
 }
