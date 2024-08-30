@@ -3,7 +3,7 @@
  *
  * Modifications are made to incorporate into ppl.nn.llm:
  *  1. remove pytorch/aten dependency
- *  2. no dropout, no splitkv, not needed in ppl.nn.llm
+ *  2. no dropout, not needed in ppl.nn.llm
  *  3. never write back softmax score
  *  4. using 64bit index if necessary
  ******************************************************************************/
@@ -20,12 +20,15 @@ void run_mha_fwd(Flash_fwd_params &params, cudaStream_t stream, bool force_split
     //FP16_SWITCH(!params.is_bf16, [&] {
     using elem_type = cutlass::half_t;
     {
-        FWD_HEADDIM_SWITCH(params.d, [&] {
-            if (params.num_splits <= 1 && !force_split_kernel) {  // If we don't set it num_splits == 0
-                run_mha_fwd_<elem_type, kHeadDim>(params, stream);
-            } else {
-                // run_mha_fwd_splitkv_dispatch<elem_type, kHeadDim>(params, stream);
-            }
+        HEADDIM_SWITCH(params.d, [&] {
+            QUANTBIT_SWITCH(params.quant_bit, [&] {
+                constexpr static int QuantGroup = QuantBit;
+                if (params.num_splits <= 1 && !force_split_kernel) {  // If we don't set it num_splits == 0
+                    run_mha_fwd_<elem_type, kHeadDim, QuantBit, QuantGroup>(params, stream);
+                } else {
+                    run_mha_fwd_splitkv_dispatch<elem_type, kHeadDim, QuantBit, QuantGroup>(params, stream);
+                }
+            });
         });
     }
 }
@@ -38,31 +41,40 @@ void run_fmha_fwd(
     const void* key,
     const void* value,
     const void* optional_attn_mask,
-    const void* optional_seqstart_q, // (B + 1)
-    const void* optional_seqstart_k, // (B + 1)
+    const void* optional_seqstart_q,
+    const void* optional_seqstart_k,
+    const void* optional_block_table,       // block table for paged attention
+    const void* optional_cache_batch_idx,   // int32
+    const void* optional_k_quant_scale,
+    const void* optional_v_quant_scale,
+    const void* optional_alibi_slopes_ptr,
     const int64_t batch,
-    const int64_t query_stride_b, // 0 if dynamic batch
+    const int64_t query_stride_b,
     const int64_t query_stride_s,
     const int64_t query_stride_h,
-    const int64_t key_stride_b, // 0 if dynamic batch
+    const int64_t key_stride_b,
     const int64_t key_stride_s,
     const int64_t key_stride_h,
-    const int64_t value_stride_b, // 0 if dynamic batch
+    const int64_t value_stride_b,
     const int64_t value_stride_s,
     const int64_t value_stride_h,
-    const int64_t mask_stride_b, // mask(bias) shape: (batch, num_heads, max_seqlen, max_kvlen)
-    const int64_t mask_stride_s, //
+    const int64_t mask_stride_b,
+    const int64_t mask_stride_s,
     const int64_t mask_stride_h,
+    const int64_t alibi_slopes_stride_b,
     const int64_t output_stride_s,
     const int64_t max_seqlen,
-    const int64_t max_kvlen,     //
+    const int64_t max_kvlen,
     const int64_t num_heads,
     const int64_t num_kv_heads,
     const int64_t head_dim,
-    const int64_t is_causal, //
+    const int64_t is_causal,
+    const int64_t cache_mode,          // 0 for normal, 1 for paged attention
+    const int64_t page_block_size,
+    const int64_t block_table_batch_stride,
+    const int64_t quant_bit,           // 0 for no quant, 8 for 8bit int
+    const int64_t quant_group,
     const float attn_scale,
-    const void* alibi_slopes_ptr,          // set to nullptr to disable
-    const int64_t alibi_slopes_batch_stride,    // set to zero for batch-broadcasting
     void* output)
 {
     Flash_fwd_params params = {};
@@ -76,6 +88,10 @@ void run_fmha_fwd(
 
     // set bias ptr
     params.bias_ptr = const_cast<void*>(optional_attn_mask);
+
+    // set scale ptr
+    params.k_scale_ptr = const_cast<void*>(optional_k_quant_scale);
+    params.v_scale_ptr = const_cast<void*>(optional_v_quant_scale);
 
     params.is_bf16 = false; // TODO
 
@@ -132,9 +148,16 @@ void run_fmha_fwd(
 
     params.scale_softmax = attn_scale;
     params.scale_softmax_log2 = attn_scale * M_LOG2E;
+    params.scale_bias = 1.0f / params.scale_softmax;
 
     params.is_causal = is_causal;
     params.is_seqlens_k_cumulative = true;
+
+    params.block_table = const_cast<int64_t*>(reinterpret_cast<const int64_t*>(optional_block_table));
+    params.block_table_batch_stride = block_table_batch_stride;
+    params.page_block_size = page_block_size;
+
+    params.cache_batch_idx = const_cast<int64_t*>(reinterpret_cast<const int64_t*>(optional_cache_batch_idx));
 
     // If window_size != (-1, -1), implements sliding window local attention. Query at position i
     // will only attend to keys between
@@ -147,10 +170,19 @@ void run_fmha_fwd(
     }
 
     // TODO: alibi_slope;
-    params.alibi_slopes_ptr = const_cast<void*>(alibi_slopes_ptr);
-    params.alibi_slopes_batch_stride = alibi_slopes_batch_stride;
+    params.alibi_slopes_ptr = const_cast<void*>(optional_alibi_slopes_ptr);
+    params.alibi_slopes_batch_stride = alibi_slopes_stride_b;
 
-    run_mha_fwd(params, stream);
+    //
+    bool paged_KVCache = cache_mode==1 && optional_block_table!=nullptr;
+    if (paged_KVCache)
+        params.num_splits = 1;
+
+    // kv quant group
+    params.quant_bit = quant_bit;
+    params.quant_group = quant_group;
+
+    run_mha_fwd(params, stream, paged_KVCache);
 }
 
 }}}}}

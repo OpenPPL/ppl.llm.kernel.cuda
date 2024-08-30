@@ -639,17 +639,21 @@ void dynamic_batching_decoding_cache_sharemem_attention_fp16_kernel(dynamic_batc
             __syncthreads();
 
             // final reduce for multi-block output
-            const int64_t head_dim_idx_base = threadIdx.x / MULTI_BLOCK * VEC_SIZE;
+            const int64_t head_dim_idx_base   = threadIdx.x / MULTI_BLOCK * VEC_SIZE;
             const int64_t head_dim_idx_stride = TPB / MULTI_BLOCK * VEC_SIZE;
 
-            for (int64_t head_dim_idx = head_dim_idx_base; head_dim_idx < HEAD_SIZE; head_dim_idx += head_dim_idx_stride) {
+            #pragma unroll
+            for (int64_t head_dim_offset = 0; head_dim_offset < HEAD_SIZE; head_dim_offset += head_dim_idx_stride) {
+                int64_t head_dim_idx = head_dim_idx_base + head_dim_offset;
                 half final_out[VEC_SIZE];
                 local_scale = scale_smem[warp_lane_id];
-                copy<VEC_SIZE*sizeof(half)>(
-                    &partial_o[
-                        head_dim_idx * MULTI_BLOCK +
-                        multi_block_idx * VEC_SIZE],
-                    final_out);
+                if (head_dim_idx < HEAD_SIZE) {
+                    copy<VEC_SIZE*sizeof(half)>(
+                        &partial_o[
+                            head_dim_idx * MULTI_BLOCK +
+                            multi_block_idx * VEC_SIZE],
+                        final_out);
+                }
 
                 #pragma unroll
                 for (int32_t i = 0; i < VEC_SIZE; i++) {
@@ -661,7 +665,7 @@ void dynamic_batching_decoding_cache_sharemem_attention_fp16_kernel(dynamic_batc
                     final_out[i] = __float2half(float_out);
                 }
 
-                if (multi_block_idx == 0) {
+                if (multi_block_idx == 0 && head_dim_idx < HEAD_SIZE) {
                     copy<VPT>(
                         final_out,
                         &p.output[
@@ -1013,17 +1017,21 @@ void dynamic_batching_decoding_cache_infinity_attention_fp16_kernel(dynamic_batc
             }
             __syncthreads();
 
-            const int64_t head_dim_idx_base = threadIdx.x / MULTI_BLOCK * VEC_SIZE;
+            const int64_t head_dim_idx_base   = threadIdx.x / MULTI_BLOCK * VEC_SIZE;
             const int64_t head_dim_idx_stride = TPB / MULTI_BLOCK * VEC_SIZE;
 
-            for (int64_t head_dim_idx = head_dim_idx_base; head_dim_idx < HEAD_SIZE; head_dim_idx += head_dim_idx_stride) {
+            #pragma unroll
+            for (int64_t head_dim_offset = 0; head_dim_offset < HEAD_SIZE; head_dim_offset += head_dim_idx_stride) {
+                int64_t head_dim_idx = head_dim_idx_base + head_dim_offset;
                 half final_out[VEC_SIZE];
                 local_scale = tmp_buffer[warp_lane_id];
-                copy<VEC_SIZE*sizeof(half)>(
-                    &partial_o[
-                        head_dim_idx * MULTI_BLOCK +
-                        multi_block_idx * VEC_SIZE],
-                    final_out);
+                if (head_dim_idx < HEAD_SIZE) {
+                    copy<VEC_SIZE*sizeof(half)>(
+                        &partial_o[
+                            head_dim_idx * MULTI_BLOCK +
+                            multi_block_idx * VEC_SIZE],
+                        final_out);
+                }
 
                 #pragma unroll
                 for (int32_t i = 0; i < VEC_SIZE; i++) {
@@ -1035,7 +1043,7 @@ void dynamic_batching_decoding_cache_infinity_attention_fp16_kernel(dynamic_batc
                     final_out[i] = __float2half(float_out);
                 }
 
-                if (multi_block_idx == 0) {
+                if (multi_block_idx == 0 && head_dim_idx < HEAD_SIZE) {
                     copy<VPT>(
                         final_out,
                         &p.output[
@@ -1813,15 +1821,11 @@ void dynamic_batching_decoding_group_query_cache_attention_fp16_kernel(dynamic_b
             const int64_t head_dim_base     = tid / MULTI_BLOCK * F16PV;
             const int64_t head_dim_stride   = TPB / MULTI_BLOCK * F16PV;
 
-            #pragma unroll
-            for (int64_t head_offset = 0; head_offset < VALID_REDUCE_HEAD; head_offset++) {
-                if ((QUERY_GROUP > FULL_GROUP_SIZE)
-                        && (TAIL_GROUP_SIZE > 0)
-                        && (blockIdx.x % GROUP_BLOCK_SIZE == GROUP_BLOCK_SIZE - 1)
-                        && (head_offset >= TAIL_GROUP_SIZE)) {
-                    break;
-                }
+            const int64_t block_reduce_head = (QUERY_GROUP > FULL_GROUP_SIZE) && (TAIL_GROUP_SIZE > 0) && (blockIdx.x % GROUP_BLOCK_SIZE == GROUP_BLOCK_SIZE - 1)
+                                ? TAIL_GROUP_SIZE
+                                : VALID_REDUCE_HEAD;
 
+            for (int64_t head_offset = 0; head_offset < block_reduce_head; head_offset++) {
                 // get max block log sum exp
                 fp32_t local_log_sum_exp = (warp_lane_id < MULTI_BLOCK)
                             ? partial_log_sum[head_offset * num_batchs * MULTI_BLOCK + multi_block_idx]
@@ -1851,15 +1855,19 @@ void dynamic_batching_decoding_group_query_cache_attention_fp16_kernel(dynamic_b
                 __syncthreads();
 
                 // block ouput reduce
-                for (int64_t head_dim_idx = head_dim_base; head_dim_idx < HEAD_SIZE; head_dim_idx += head_dim_stride) {
+                #pragma unroll
+                for (int64_t head_dim_offset = 0; head_dim_offset < HEAD_SIZE; head_dim_offset += head_dim_stride) {
+                    int64_t head_dim_idx = head_dim_base + head_dim_offset;
                     fp16_t final_out[F16PV];
                     local_scale = tmp_buffer[warp_lane_id];
-                    copy<sizeof(fp16_t) * F16PV>(
-                        &partial_o[
-                            head_offset * num_batchs * HEAD_SIZE * MULTI_BLOCK +
-                            head_dim_idx * MULTI_BLOCK +
-                            multi_block_idx * F16PV],
-                        final_out);
+                    if (head_dim_idx < HEAD_SIZE) {
+                        copy<sizeof(fp16_t) * F16PV>(
+                            &partial_o[
+                                head_offset * num_batchs * HEAD_SIZE * MULTI_BLOCK +
+                                head_dim_idx * MULTI_BLOCK +
+                                multi_block_idx * F16PV],
+                            final_out);
+                    }
 
                     #pragma unroll
                     for (int64_t i = 0; i < F16PV; i++) {
@@ -1871,7 +1879,7 @@ void dynamic_batching_decoding_group_query_cache_attention_fp16_kernel(dynamic_b
                         final_out[i] = __float2half(float_out);
                     }
 
-                    if (multi_block_idx == 0) {
+                    if (multi_block_idx == 0 && head_dim_idx < HEAD_SIZE) {
                         copy<sizeof(fp16_t) * F16PV>(
                             final_out,
                             &o_glb[head_offset * HEAD_SIZE + head_dim_idx]);
@@ -2121,34 +2129,83 @@ ppl::common::RetCode dynamic_batching_multi_head_cache_attention::forward_prefil
 {
     if (cfg.prefill_batches > 0) {
         const void* prefill_seqstart_q = ((int64_t*)cfg.seqstarts) + cfg.decoding_batches;
+        const void* prefill_seqstart_k = ((int64_t*)cfg.kvstarts) + cfg.decoding_batches;
 
-        return llm::cuda::flash_attn2::flash_attn2_fmha(
-            stream,
-            *cfg.device_prop,
-            cfg.datatype,
-            cfg.query,
-            cfg.current_key,
-            cfg.current_value,
-            cfg.attn_mask,
-            prefill_seqstart_q,
-            prefill_seqstart_q,
-            cfg.alibi_slopes,
-            cfg.prefill_batches,
-            0, cfg.q_stride_s, cfg.head_dim,
-            0, cfg.k_stride_s, cfg.head_dim,
-            0, cfg.v_stride_s, cfg.head_dim,
-            0, cfg.mask_stride_s, cfg.mask_stride_h,
-            cfg.o_stride_s,
-            0,
-            cfg.max_seqlen,
-            cfg.max_kvlen,
-            cfg.num_heads,
-            cfg.num_kv_heads,
-            cfg.head_dim,
-            cfg.is_causal,
-            cfg.attn_scale,
-            cfg.output
-        );
+        if (cfg.enable_cache_prefill) {
+            int64_t quant_bit = 8, quant_group = 8;
+
+            const void* prefill_key   = ((int8_t*)cfg.cache) + cfg.layer_idx * cfg.cache_stride_l;
+            const void* prefill_value = ((int8_t*)prefill_key) + cfg.cache_stride_kv;
+
+            const void* prefill_key_scale   = ((fp16_t*)cfg.scale) + cfg.layer_idx * (int64_t)(cfg.cache_stride_l / quant_group);
+            const void* prefill_value_scale = ((fp16_t*)prefill_key_scale) + (int64_t)(cfg.cache_stride_kv / quant_group);
+
+            return llm::cuda::flash_attn2::flash_attn2_paged_fmha(
+                stream,
+                *cfg.device_prop,
+                cfg.datatype,
+                cfg.query,
+                prefill_key,
+                prefill_value,
+                cfg.attn_mask,
+                prefill_seqstart_q,
+                prefill_seqstart_k,
+                cfg.cachestarts,
+                nullptr,
+                prefill_key_scale,
+                prefill_value_scale,
+                cfg.alibi_slopes,
+                cfg.prefill_batches,
+                0, cfg.q_stride_s, cfg.head_dim,
+                cfg.cache_stride_s, cfg.cache_stride_s, cfg.cache_stride_h,
+                cfg.cache_stride_s, cfg.cache_stride_s, cfg.cache_stride_h,
+                0, cfg.mask_stride_s, cfg.mask_stride_h,
+                0,
+                cfg.o_stride_s,
+                cfg.max_seqlen,
+                cfg.max_kvlen,
+                cfg.num_heads,
+                cfg.num_kv_heads,
+                cfg.head_dim,
+                (int64_t)cfg.is_causal,
+                cfg.page_size,
+                cfg.cachestarts_stride_b,
+                quant_bit,
+                quant_group,
+                cfg.attn_scale,
+                cfg.output);
+        } else {
+            return llm::cuda::flash_attn2::flash_attn2_fmha(
+                stream,
+                *cfg.device_prop,
+                cfg.datatype,
+                cfg.query,
+                cfg.current_key,
+                cfg.current_value,
+                cfg.attn_mask,
+                prefill_seqstart_q,
+                prefill_seqstart_k,
+                nullptr,
+                nullptr,
+                cfg.alibi_slopes,
+                cfg.prefill_batches,
+                0, cfg.q_stride_s, cfg.head_dim,
+                0, cfg.k_stride_s, cfg.head_dim,
+                0, cfg.v_stride_s, cfg.head_dim,
+                0, cfg.mask_stride_s, cfg.mask_stride_h,
+                0,
+                cfg.o_stride_s,
+                cfg.max_seqlen,
+                cfg.max_kvlen,
+                cfg.num_heads,
+                cfg.num_kv_heads,
+                cfg.head_dim,
+                (int64_t)cfg.is_causal,
+                0,
+                0,
+                cfg.attn_scale,
+                cfg.output);
+        }
     } else {
         return ppl::common::RC_SUCCESS;
     }

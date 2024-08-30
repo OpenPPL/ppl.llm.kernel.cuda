@@ -15,9 +15,6 @@
 
 // #include <ATen/cuda/CUDAGraphsUtils.cuh> // For at::cuda::philox::unpack
 
-#include "cuda_runtime.h"
-#include "cuda_runtime_api.h"
-
 constexpr int TOTAL_DIM = 0;
 constexpr int H_DIM = 1;
 constexpr int D_DIM = 2;
@@ -25,15 +22,16 @@ constexpr int D_DIM = 2;
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 struct Qkv_params {
-    // using index_t = uint32_t;
-    // CAUTION: use 64bit index may increase reg usage.
     using index_t = int64_t;
-
     // The QKV matrices.
     void *__restrict__ q_ptr;
     void *__restrict__ k_ptr;
     void *__restrict__ v_ptr;
     void *__restrict__ bias_ptr;
+
+    // scale for kv
+    void *__restrict__ k_scale_ptr;
+    void *__restrict__ v_scale_ptr;
 
     // The stride between rows of the Q, K and V matrices.
     index_t q_batch_stride;
@@ -46,7 +44,9 @@ struct Qkv_params {
     index_t k_head_stride;
     index_t v_head_stride;
 
-    // stride for attn_bias (batch, num_heads, seqlen_q, seqlen_kv)
+    // stride for attn_bias
+    // shape: (batch, num_heads, seqlen, kvlen)      (static batch)
+    //        (num_heads, sum_seqlen, sum_kvlen)    (dynamic batch, block-diagonal)
     index_t bias_batch_stride;
     index_t bias_head_stride;
     index_t bias_seqlenq_stride;
@@ -86,44 +86,51 @@ struct Flash_fwd_params : public Qkv_params {
     // The scaling factors for the kernel.
     float scale_softmax;
     float scale_softmax_log2;
+    float scale_bias;   // scaling factor for bias, because the bias is scaled internally.
 
     // array of length b+1 holding starting offset of each sequence.
     int64_t * __restrict__ cu_seqlens_q;
     int64_t * __restrict__ cu_seqlens_k;
 
     // If provided, the actual length of each k sequence.
-    int *__restrict__ seqused_k;
-    int *__restrict__ blockmask; // not used ??
+    int * __restrict__ seqused_k;
 
-    // // The K_new and V_new matrices.
+    int *__restrict__ blockmask;
+
+    // The K_new and V_new matrices.
     void * __restrict__ knew_ptr;
     void * __restrict__ vnew_ptr;
 
-    // // The stride between rows of the Q, K and V matrices.
-    // index_t knew_batch_stride;
-    // index_t vnew_batch_stride;
-    // index_t knew_row_stride;
-    // index_t vnew_row_stride;
-    // index_t knew_head_stride;
-    // index_t vnew_head_stride;
+    // The stride between rows of the Q, K and V matrices.
+    index_t knew_batch_stride;
+    index_t vnew_batch_stride;
+    index_t knew_row_stride;
+    index_t vnew_row_stride;
+    index_t knew_head_stride;
+    index_t vnew_head_stride;
 
-    // // The cos and sin matrices for rotary embedding.
-    // void * __restrict__ rotary_cos_ptr;
-    // void * __restrict__ rotary_sin_ptr;
+    // The cos and sin matrices for rotary embedding.
+    void * __restrict__ rotary_cos_ptr;
+    void * __restrict__ rotary_sin_ptr;
 
-    // // The indices to index into the KV cache.
-    // int *__restrict__ cache_batch_idx;
+    // The indices to index into the KV cache.
+    index_t * __restrict__ cache_batch_idx;
+
+    // Paged KV cache
+    index_t * __restrict__ block_table;
+    index_t block_table_batch_stride;
+    int page_block_size;
 
     // Dropout is not needed here
     // all kernels are set to Is_dropout=false
     // // The dropout probability (probability of keeping an activation).
-    // float p_dropout;
+    float p_dropout;
     // // uint32_t p_dropout_in_uint;
     // // uint16_t p_dropout_in_uint16_t;
     // uint8_t p_dropout_in_uint8_t;
 
     // // Scale factor of 1 / (1 - p_dropout).
-    // float rp_dropout;
+    float rp_dropout;
     // float scale_softmax_rp_dropout;
 
     // Local window size
@@ -149,6 +156,9 @@ struct Flash_fwd_params : public Qkv_params {
 
     void * __restrict__ alibi_slopes_ptr;
     index_t alibi_slopes_batch_stride;
+
+    int quant_group;
+    int quant_bit;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -195,7 +205,7 @@ struct Flash_fwd_params : public Qkv_params {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template<typename T, int Headdim> void run_mha_fwd_(Flash_fwd_params &params, cudaStream_t stream);
-// template<typename T, int Headdim> void run_mha_fwd_splitkv_dispatch(Flash_fwd_params &params, cudaStream_t stream);
+template<typename T, int Headdim, int QuantBit, int QuantGroup> void run_mha_fwd_(Flash_fwd_params &params, cudaStream_t stream);
+template<typename T, int Headdim, int QuantBit, int QuantGroup> void run_mha_fwd_splitkv_dispatch(Flash_fwd_params &params, cudaStream_t stream);
 
-// template<typename T, int Headdim> void run_mha_bwd_(Flash_bwd_params &params, cudaStream_t stream, const bool configure);
+// template<typename T, int Headdim> void run_mha_bwd_(Flash_bwd_params &params, cudaStream_t stream);
