@@ -11,29 +11,53 @@ from typing import List, Optional
 
 DTYPE_MAP = {
     "fp16": "cutlass::half_t",
-    "bf16": "cutlass::bfloat16_t",
+    # "bf16": "cutlass::bfloat16_t",
+}
+
+QUANT_BIT_MAP = {
+    "fp16": 0,
+    "int8": 8,
+}
+
+QUANT_GROUP_MAP = {
+    "fp16": 0,
+    "int8": 8,
 }
 
 SM = [80]  # Sm80 kernels support up to
-HEAD_DIMENSIONS = [32, 64, 96, 128, 160, 192, 224, 256]
+# HEAD_DIMENSIONS = [32, 64, 96, 128, 160, 192, 224, 256]
+HEAD_DIMENSIONS = [64, 96, 128, 256]
+# KERNEL_IMPL_TEMPLATE_FWD = """#include "flash_fwd_launch_template.h"
+
+# template<>
+# void run_mha_fwd_<{DTYPE}, {HEAD_DIM}>(Flash_fwd_params &params, cudaStream_t stream) {{
+#     run_mha_fwd_hdim{HEAD_DIM}<{DTYPE}>(params, stream);
+# }}
+# """
+
+# KERNEL_IMPL_TEMPLATE_FWD_SPLIT = """#include "flash_fwd_launch_template.h"
+
+# template void run_mha_fwd_splitkv_dispatch<{DTYPE}, {HEAD_DIM}>(Flash_fwd_params &params, cudaStream_t stream);
+# """
+
 KERNEL_IMPL_TEMPLATE_FWD = """#include "flash_fwd_launch_template.h"
 
 template<>
-void run_mha_fwd_<{DTYPE}, {HEAD_DIM}>(Flash_fwd_params &params, cudaStream_t stream) {{
-    run_mha_fwd_hdim{HEAD_DIM}<{DTYPE}>(params, stream);
+void run_mha_fwd_<{DTYPE}, {HEAD_DIM}, {QUANT_BIT}, {QUANT_GROUP}>(Flash_fwd_params &params, cudaStream_t stream) {{
+    run_mha_fwd_hdim{HEAD_DIM}<{DTYPE}, {QUANT_BIT}, {QUANT_GROUP}>(params, stream);
 }}
 """
 
 KERNEL_IMPL_TEMPLATE_FWD_SPLIT = """#include "flash_fwd_launch_template.h"
 
-template void run_mha_fwd_splitkv_dispatch<{DTYPE}, {HEAD_DIM}>(Flash_fwd_params &params, cudaStream_t stream);
+template void run_mha_fwd_splitkv_dispatch<{DTYPE}, {HEAD_DIM}, {QUANT_BIT}, {QUANT_GROUP}>(Flash_fwd_params &params, cudaStream_t stream);
 """
 
 KERNEL_IMPL_TEMPLATE_BWD = """#include "flash_bwd_launch_template.h"
 
 template<>
-void run_mha_bwd_<{DTYPE}, {HEAD_DIM}>(Flash_bwd_params &params, cudaStream_t stream, const bool configure) {{
-    run_mha_bwd_hdim{HEAD_DIM}<{DTYPE}>(params, stream, configure);
+void run_mha_bwd_<{DTYPE}, {HEAD_DIM}>(Flash_bwd_params &params, cudaStream_t stream) {{
+    run_mha_bwd_hdim{HEAD_DIM}<{DTYPE}>(params, stream);
 }}
 """
 
@@ -43,32 +67,40 @@ class Kernel:
     sm: int
     dtype: str
     head_dim: int
+    quant_type: str
+    quant_group: int
     direction: str
 
     @property
     def template(self) -> str:
         if self.direction == "fwd":
             return KERNEL_IMPL_TEMPLATE_FWD.format(
-                DTYPE=DTYPE_MAP[self.dtype], HEAD_DIM=self.head_dim
+                # DTYPE=DTYPE_MAP[self.dtype], HEAD_DIM=self.head_dim
+                DTYPE=DTYPE_MAP[self.dtype], HEAD_DIM=self.head_dim, QUANT_BIT=QUANT_BIT_MAP[self.quant_type], QUANT_GROUP=QUANT_GROUP_MAP[self.quant_type]
             )
         elif self.direction == "bwd":
             return KERNEL_IMPL_TEMPLATE_BWD.format(
-                DTYPE=DTYPE_MAP[self.dtype], HEAD_DIM=self.head_dim
+                # DTYPE=DTYPE_MAP[self.dtype], HEAD_DIM=self.head_dim
+                DTYPE=DTYPE_MAP[self.dtype], HEAD_DIM=self.head_dim, QUANT_BIT=QUANT_BIT_MAP[self.quant_type], QUANT_GROUP=QUANT_GROUP_MAP[self.quant_type]
             )
-        else:
+        elif self.direction == "fwd_split":
             return KERNEL_IMPL_TEMPLATE_FWD_SPLIT.format(
-                DTYPE=DTYPE_MAP[self.dtype], HEAD_DIM=self.head_dim
+                # DTYPE=DTYPE_MAP[self.dtype], HEAD_DIM=self.head_dim
+                DTYPE=DTYPE_MAP[self.dtype], HEAD_DIM=self.head_dim, QUANT_BIT=QUANT_BIT_MAP[self.quant_type], QUANT_GROUP=QUANT_GROUP_MAP[self.quant_type]
             )
 
     @property
     def filename(self) -> str:
-        return f"flash_{self.direction}_hdim{self.head_dim}_{self.dtype}_sm{self.sm}.cu"
+        # return f"flash_{self.direction}_hdim{self.head_dim}_{self.dtype}_sm{self.sm}.cu"
+        return f"flash_{self.direction}_hdim{self.head_dim}_{self.quant_type}_g{self.quant_group}_sm{self.sm}.cu"
 
 
 def get_all_kernels() -> List[Kernel]:
-    for dtype, head_dim, sm in itertools.product(DTYPE_MAP.keys(), HEAD_DIMENSIONS, SM):
-        for direction in ["fwd", "bwd", "fwd_split"]:
-            yield Kernel(sm=sm, dtype=dtype, head_dim=head_dim, direction=direction)
+    # for dtype, head_dim, sm in itertools.product(DTYPE_MAP.keys(), HEAD_DIMENSIONS, SM):
+    #     for direction in ["fwd", "bwd", "fwd_split"]:
+    for dtype, quant_type, head_dim, sm in itertools.product(DTYPE_MAP.keys(), QUANT_BIT_MAP.keys(), HEAD_DIMENSIONS, SM):
+        for direction in ["fwd", "fwd_split"]:
+            yield Kernel(sm=sm, dtype=dtype, head_dim=head_dim, quant_type=quant_type, quant_group=QUANT_GROUP_MAP[quant_type], direction=direction)
 
 
 def write_kernel(kernel: Kernel, autogen_dir: Path) -> None:
