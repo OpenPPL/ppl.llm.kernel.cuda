@@ -7,6 +7,7 @@ option(PPLNN_CUDA_ENABLE_NCCL "enable nccl" OFF)
 option(PPLNN_CUDA_ENABLE_CUDNN "enable cudnn, if it is disabled, some kernel will not work" OFF)
 option(PPLNN_INSTALL "" ON)
 option(PPLNN_CUDA_DISABLE_CONV_ALL "" ON)
+option(PPLNN_ENABLE_FP8 "enable fp8" OFF)
 
 if(MSVC)
     option(PPLNN_USE_MSVC_STATIC_RUNTIME "" ON)
@@ -51,6 +52,12 @@ if (PPLNN_CUDA_ENABLE_CUDNN)
     list(APPEND PPLNN_CUDA_EXTERNAL_LINK_LIBRARIES ${CUDNN_LIBRARY})
 else()
     message(WARNING "cudnn is disabled, some kernel will not avaliable.")
+endif()
+
+# --------------------------------------------------------------------------- #
+
+if (PPLNN_ENABLE_FP8)
+    list(APPEND PPLNN_CUDA_BINARY_DEFINITIONS PPLNN_ENABLE_FP8)
 endif()
 
 # --------------------------------------------------------------------------- #
