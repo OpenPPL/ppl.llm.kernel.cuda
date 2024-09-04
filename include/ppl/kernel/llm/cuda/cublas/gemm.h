@@ -89,6 +89,36 @@ ppl::common::RetCode gemm_i8i8i32_col32(
     const bool use_4r4_kernel,
     void* output_col32); // int32
 
+
+#ifdef PPLNN_ENABLE_FP8
+ 
+ppl::common::RetCode gemm_fp8(
+    const cudaStream_t stream,
+    const cublasLtHandle_t& cublaslt_handle,
+    const cublasLtMatmulAlgo_t* algo,
+    const bool transa,
+    const int64_t lda,
+    const ppl::common::datatype_t typea,
+    const void* A, // fp8
+    const bool transb,
+    const int64_t ldb,
+    const ppl::common::datatype_t typeb,
+    const void* B, // fp8
+    const void* bias, // fp16
+    const int64_t M,
+    const int64_t N,
+    const int64_t K,
+    const float alpha,
+    const float beta,
+    const int64_t workspace_size,
+    void* workspace,
+    const int64_t ldc,
+    const ppl::common::datatype_t typec,
+    void* C); // fp16
+
+#endif
+
+
 }}}}}
 
 #endif

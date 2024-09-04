@@ -20,6 +20,11 @@
 
 #include "cudakernel/common/common.cuh"
 
+#ifdef PPLNN_ENABLE_FP8
+
+#include <cuda_fp8.h>
+
+#endif
 #include <cuda_fp16.h>
 
 namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace cublas {
@@ -481,5 +486,139 @@ ppl::common::RetCode gemm_i8i8i32_col32(
 
     return ppl::common::RC_SUCCESS;
 }
+
+#ifdef PPLNN_ENABLE_FP8
+
+ppl::common::RetCode gemm_fp8(
+    const cudaStream_t stream,
+    const cublasLtHandle_t& cublaslt_handle,
+    const cublasLtMatmulAlgo_t* algo,
+    const bool transa,
+    const int64_t lda,
+    const ppl::common::datatype_t typea,
+    const void* A,
+    const bool transb,
+    const int64_t ldb,
+    const ppl::common::datatype_t typeb,
+    const void* B,
+    const void* bias,
+    const int64_t M,
+    const int64_t N,
+    const int64_t K,
+    const float alpha,
+    const float beta,
+    const int64_t workspace_size,
+    void* workspace,
+    const int64_t ldc,
+    const ppl::common::datatype_t typec,
+    void* C)
+{
+    if (typea != ppl::common::DATATYPE_FLOAT8E4M3) {
+        LOG(ERROR) << "only support fp8 A matrix";
+        return ppl::common::RC_UNSUPPORTED;
+    }
+    if (typeb != ppl::common::DATATYPE_FLOAT8E4M3) {
+        LOG(ERROR) << "only support fp8 B matrix";
+        return ppl::common::RC_UNSUPPORTED;
+    }
+    if (typec != ppl::common::DATATYPE_FLOAT16) {
+        LOG(ERROR) << "only support fp16 C matrix";
+        return ppl::common::RC_UNSUPPORTED;
+    }
+
+    size_t AtypeSize = ppl::common::GetSizeOfDataType(typea);
+    size_t BtypeSize = ppl::common::GetSizeOfDataType(typeb);
+    size_t CtypeSize = ppl::common::GetSizeOfDataType(typec);
+
+    cublasOperation_t cublas_transa = transa == true ? CUBLAS_OP_T : CUBLAS_OP_N;
+    cublasOperation_t cublas_transb = transb == true ? CUBLAS_OP_T : CUBLAS_OP_N;
+
+    if (((transa == CUBLAS_OP_N ? M : K) * AtypeSize) % 16 != 0) {
+        LOG(ERROR) << "A matrix dimension is not 16-byte aligned";
+        return ppl::common::RC_UNSUPPORTED;
+    }
+    if (((transb == CUBLAS_OP_N ? K : N) * BtypeSize) % 16 != 0) {
+        LOG(ERROR) << "B matrix dimension is not 16-byte aligned";
+        return ppl::common::RC_UNSUPPORTED;
+    }
+    if ((M * CtypeSize) % 16 != 0) {
+        LOG(ERROR) << "C matrix dimension is not 16-byte aligned";
+        return ppl::common::RC_UNSUPPORTED;
+    }
+
+
+    if ((lda * AtypeSize) % 16 != 0 || (ldb * BtypeSize) % 16 != 0 || (ldc * CtypeSize) % 16 != 0) {
+        LOG(ERROR) << "ld dimension is not 16-byte aligned";
+        return ppl::common::RC_UNSUPPORTED;
+    }
+
+    if (intptr_t(A) % 16 != 0 || intptr_t(B) % 16 != 0 || intptr_t(C) % 16 != 0) {
+        LOG(ERROR) << "Matrix pointers are not 16-byte aligned";
+        return ppl::common::RC_UNSUPPORTED;
+    }
+
+    cublasLtMatmulDesc_t operationDesc = nullptr;
+    cublasLtMatrixLayout_t Adesc = nullptr, Bdesc = nullptr, Cdesc = nullptr;
+    cudaDataType_t scaleType = CUDA_R_32F;
+    cublasComputeType_t computeType = CUBLAS_COMPUTE_32F;
+    CUBLAS_CHECK_RC(cublasLtMatmulDescCreate(&operationDesc, computeType, scaleType));
+
+    // exchange A & B to col-major
+    CUBLAS_CHECK_RC(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSA, &cublas_transb, sizeof(cublas_transb)));
+    CUBLAS_CHECK_RC(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSB, &cublas_transa, sizeof(cublas_transa)));
+
+    if (bias != nullptr) {
+        cublasLtEpilogue_t epilogue = CUBLASLT_EPILOGUE_BIAS;
+        CUBLAS_CHECK_RC(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_EPILOGUE, &epilogue, sizeof(epilogue)));
+        CUBLAS_CHECK_RC(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_BIAS_POINTER, &bias, sizeof(void*)));
+    }
+
+    cudaDataType_t abType = CUDA_R_8F_E4M3;
+    cudaDataType_t cType = CUDA_R_16F;
+
+    CUBLAS_CHECK_RC(cublasLtMatrixLayoutCreate(&Adesc, abType, cublas_transa == CUBLAS_OP_N ? K : M, cublas_transa == CUBLAS_OP_N ? M : K, lda));
+    CUBLAS_CHECK_RC(cublasLtMatrixLayoutCreate(&Bdesc, abType, cublas_transb == CUBLAS_OP_N ? N : K, cublas_transb == CUBLAS_OP_N ? K : N, ldb));
+    CUBLAS_CHECK_RC(cublasLtMatrixLayoutCreate(&Cdesc, cType, N, M, ldc));
+
+    cublasLtMatmulPreference_t preference = nullptr;
+    constexpr int requested_algo = 1;
+    int returnedResults = 0;
+    cublasLtMatmulHeuristicResult_t heuristicResult[requested_algo] = { 0 };
+    if (algo == nullptr) {
+        CUBLAS_CHECK_RC(cublasLtMatmulPreferenceCreate(&preference));
+        CUBLAS_CHECK_RC(cublasLtMatmulPreferenceSetAttribute(preference,
+            CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &workspace_size, sizeof(workspace_size)));
+        CUBLAS_CHECK_RC(cublasLtMatmulAlgoGetHeuristic(cublaslt_handle,
+            operationDesc, Bdesc, Adesc, Cdesc, Cdesc, preference, requested_algo, heuristicResult, &returnedResults));
+        CUBLAS_CHECK_RC(cublasLtMatmulPreferenceDestroy(preference));
+    }
+    
+    CUBLAS_CHECK_RC(cublasLtMatmul(
+        cublaslt_handle,
+        operationDesc,
+        (const void*)(&alpha),
+        B,
+        Bdesc,
+        A,
+        Adesc,
+        (const void*)(&beta),
+        C,
+        Cdesc,
+        C,
+        Cdesc,
+        algo != nullptr ? algo : &heuristicResult[0].algo,
+        workspace,
+        workspace_size,
+        stream)); 
+
+    CUBLAS_CHECK_RC(cublasLtMatmulDescDestroy(operationDesc));
+    CUBLAS_CHECK_RC(cublasLtMatrixLayoutDestroy(Adesc));
+    CUBLAS_CHECK_RC(cublasLtMatrixLayoutDestroy(Bdesc));
+    CUBLAS_CHECK_RC(cublasLtMatrixLayoutDestroy(Cdesc));
+    
+    return ppl::common::RC_SUCCESS;
+}
+
+#endif
 
 }}}}}

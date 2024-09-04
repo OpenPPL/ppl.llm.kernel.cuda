@@ -94,6 +94,17 @@ else()
         ${PPLNN_DEP_PPLCUDAKERNEL_VERSION})
 endif()
 
+# -----------------------------test------------------------------------------ #
+if(PPLNN_BUILD_TESTS)
+    file(GLOB_RECURSE TEST_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/test/*.cu ${CMAKE_CURRENT_SOURCE_DIR}/test/*.h)
+
+    add_executable(test_gemm ${TEST_SOURCES})
+    target_compile_options(test_gemm PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-O3>)
+    target_include_directories(test_gemm PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/test)
+    target_link_libraries(test_gemm PRIVATE pplkernelcuda_static ${PPLKERNELCUDA_LINK_LIBRARIES} -lcublasLt)
+endif()
+
+
 # --------------------------------------------------------------------------- #
 
 set(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
