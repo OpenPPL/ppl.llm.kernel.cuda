@@ -39,7 +39,7 @@ ppl::common::RetCode column_parallel_linear(
         return ppl::common::RC_UNSUPPORTED;
     }
 
-    const int64_t M = input_shape->CalcElementsToDimensionExcludingPadding(input_shape->GetDimCount() - 1);
+    const int64_t M = input_shape->CalcElementsToDimensionIncludingPadding(input_shape->GetDimCount() - 1);
     const int64_t Nw = out_features / nccl_param->size;
     const int64_t K = in_features;
 

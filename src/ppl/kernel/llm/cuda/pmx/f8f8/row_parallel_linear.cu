@@ -39,7 +39,7 @@ ppl::common::RetCode row_parallel_linear(
     // weight (N, K/w)
     // output (M, N)
 
-    const int64_t M = input_shape->CalcElementsToDimensionExcludingPadding(input_shape->GetDimCount() - 1);
+    const int64_t M = input_shape->CalcElementsToDimensionIncludingPadding(input_shape->GetDimCount() - 1);
     const int64_t N = out_features;
     const int64_t Kw = in_features / nccl_param->size;
 
