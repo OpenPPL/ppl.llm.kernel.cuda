@@ -36,20 +36,20 @@ __global__ void kv_cache_reorder_kernel(
     int64_t tp_size,
     char* outer_mem
 ) {
-    int idx_l = blockIdx.y;
-    int idx_kv = threadIdx.y;
-    int idx_h = blockIdx.z / page_nums;
-    int idx_t = blockIdx.x;
-    int idx_d = threadIdx.x;
-    int page_id_offset = blockIdx.z % page_nums;
-    int page_id = page_ids[page_id_offset];
+    long long idx_l = blockIdx.y;
+    long long idx_kv = threadIdx.y;
+    long long idx_h = blockIdx.z / page_nums;
+    long long idx_t = blockIdx.x;
+    long long idx_d = threadIdx.x;
+    long long page_id_offset = blockIdx.z % page_nums;
+    long long page_id = page_ids[page_id_offset];
 
-    int page_cache_bytes = src_stride.p_stride_cache;
-    int page_scale_bytes = src_stride.p_stride_scale;
-    int page_size = blockDim.x;
+    long long page_cache_bytes = src_stride.p_stride_cache;
+    long long page_scale_bytes = src_stride.p_stride_scale;
+    long long page_size = blockDim.x;
 
-    int src_cache_idx = page_id * page_size * head_dim + idx_l * src_stride.l_stride_cache + idx_kv * src_stride.kv_stride_cache + idx_h * src_stride.h_stride_cache + idx_t * src_stride.t_stride_cache + idx_d * src_stride.d_stride_cache;
-    int dst_cache_idx = idx_d * dst_stride.d_stride_cache + idx_t * dst_stride.t_stride_cache + idx_kv * dst_stride.kv_stride_cache + idx_l * dst_stride.l_stride_cache + idx_h * dst_stride.h_stride_cache;
+    long long src_cache_idx = page_id * page_size * head_dim + idx_l * src_stride.l_stride_cache + idx_kv * src_stride.kv_stride_cache + idx_h * src_stride.h_stride_cache + idx_t * src_stride.t_stride_cache + idx_d * src_stride.d_stride_cache;
+    long long dst_cache_idx = idx_d * dst_stride.d_stride_cache + idx_t * dst_stride.t_stride_cache + idx_kv * dst_stride.kv_stride_cache + idx_l * dst_stride.l_stride_cache + idx_h * dst_stride.h_stride_cache;
 
     char* outer_cache = outer_mem + (page_cache_bytes + page_scale_bytes) * tp_size * page_id_offset + tp_rank * page_cache_bytes;
     outer_cache[dst_cache_idx] = kv_cache[src_cache_idx];
@@ -57,8 +57,9 @@ __global__ void kv_cache_reorder_kernel(
     if (idx_d >= head_dim / group_size * 2) {
         return;
     }
-    int src_scale_idx = page_id * page_size * (head_dim / group_size * 2) + idx_l * src_stride.l_stride_scale + idx_kv * src_stride.kv_stride_scale + idx_h * src_stride.h_stride_scale + idx_t * src_stride.t_stride_scale + idx_d * src_stride.d_stride_scale;
-    int dst_scale_idx = idx_d * dst_stride.d_stride_scale + idx_t * dst_stride.t_stride_scale + idx_kv * dst_stride.kv_stride_scale + idx_l * dst_stride.l_stride_scale + idx_h * dst_stride.h_stride_scale;
+
+    long long src_scale_idx = page_id * page_size * (head_dim / group_size * 2) + idx_l * src_stride.l_stride_scale + idx_kv * src_stride.kv_stride_scale + idx_h * src_stride.h_stride_scale + idx_t * src_stride.t_stride_scale + idx_d * src_stride.d_stride_scale;
+    long long dst_scale_idx = idx_d * dst_stride.d_stride_scale + idx_t * dst_stride.t_stride_scale + idx_kv * dst_stride.kv_stride_scale + idx_l * dst_stride.l_stride_scale + idx_h * dst_stride.h_stride_scale;
     char* outer_scale = outer_cache + (tp_size - tp_rank) * page_cache_bytes + tp_rank * page_scale_bytes;
     outer_scale[dst_scale_idx] = kv_scale[src_scale_idx];
 }
@@ -114,21 +115,21 @@ __global__ void kv_cache_invert_reorder_kernel(
     char* kv_cache,
     char* kv_scale
 ) {
-    int idx_l = blockIdx.y;
-    int idx_kv = threadIdx.y;
-    int idx_h = blockIdx.z / page_nums;
-    int idx_t = blockIdx.x;
-    int idx_d = threadIdx.x;
+    long long idx_l = blockIdx.y;
+    long long idx_kv = threadIdx.y;
+    long long idx_h = blockIdx.z / page_nums;
+    long long idx_t = blockIdx.x;
+    long long idx_d = threadIdx.x;
 
-    int page_id_offset = blockIdx.z % page_nums;
-    int page_id = page_ids[page_id_offset];
-    int page_size = blockDim.x;
+    long long page_id_offset = blockIdx.z % page_nums;
+    long long page_id = page_ids[page_id_offset];
+    long long page_size = blockDim.x;
 
-    int page_cache_bytes = src_stride.p_stride_cache;
-    int page_scale_bytes = src_stride.p_stride_scale;
+    long long page_cache_bytes = src_stride.p_stride_cache;
+    long long page_scale_bytes = src_stride.p_stride_scale;
 
-    int src_cache_idx = idx_l * src_stride.l_stride_cache + idx_kv * src_stride.kv_stride_cache + idx_h * src_stride.h_stride_cache + idx_t * src_stride.t_stride_cache + idx_d * src_stride.d_stride_cache;
-    int dst_cache_idx = page_id * page_size * head_dim + idx_d * dst_stride.d_stride_cache + idx_t * dst_stride.t_stride_cache + idx_kv * dst_stride.kv_stride_cache + idx_l * dst_stride.l_stride_cache + idx_h * dst_stride.h_stride_cache;
+    long long src_cache_idx = idx_l * src_stride.l_stride_cache + idx_kv * src_stride.kv_stride_cache + idx_h * src_stride.h_stride_cache + idx_t * src_stride.t_stride_cache + idx_d * src_stride.d_stride_cache;
+    long long dst_cache_idx = page_id * page_size * head_dim + idx_d * dst_stride.d_stride_cache + idx_t * dst_stride.t_stride_cache + idx_kv * dst_stride.kv_stride_cache + idx_l * dst_stride.l_stride_cache + idx_h * dst_stride.h_stride_cache;
 
     const char* input_cache = outer_mem + (page_cache_bytes + page_scale_bytes) * tp_size *  page_id_offset + tp_rank * page_cache_bytes;
     kv_cache[dst_cache_idx] = input_cache[src_cache_idx];
@@ -137,8 +138,8 @@ __global__ void kv_cache_invert_reorder_kernel(
         return;
     }
 
-    int src_scale_idx = idx_l * src_stride.l_stride_scale + idx_kv * src_stride.kv_stride_scale + idx_h * src_stride.h_stride_scale + idx_t * src_stride.t_stride_scale + idx_d * src_stride.d_stride_scale;
-    int dst_scale_idx = page_id * page_size * (head_dim / group_size * 2) + idx_d * dst_stride.d_stride_scale + idx_t * dst_stride.t_stride_scale + idx_kv * dst_stride.kv_stride_scale + idx_l * dst_stride.l_stride_scale + idx_h * dst_stride.h_stride_scale;
+    long long src_scale_idx = idx_l * src_stride.l_stride_scale + idx_kv * src_stride.kv_stride_scale + idx_h * src_stride.h_stride_scale + idx_t * src_stride.t_stride_scale + idx_d * src_stride.d_stride_scale;
+    long long dst_scale_idx = page_id * page_size * (head_dim / group_size * 2) + idx_d * dst_stride.d_stride_scale + idx_t * dst_stride.t_stride_scale + idx_kv * dst_stride.kv_stride_scale + idx_l * dst_stride.l_stride_scale + idx_h * dst_stride.h_stride_scale;
     const char* input_scale = input_cache + (tp_size - tp_rank) * page_cache_bytes + tp_rank * page_scale_bytes;
     kv_scale[dst_scale_idx] = input_scale[src_scale_idx];
 }
