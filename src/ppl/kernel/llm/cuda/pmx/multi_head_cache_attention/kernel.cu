@@ -2184,7 +2184,7 @@ ppl::common::RetCode dynamic_batching_multi_head_cache_attention::forward_prefil
                 cfg.current_value,
                 cfg.attn_mask,
                 prefill_seqstart_q,
-                prefill_seqstart_k,
+                prefill_seqstart_q,
                 nullptr,
                 nullptr,
                 cfg.alibi_slopes,
