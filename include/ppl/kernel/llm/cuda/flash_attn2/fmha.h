@@ -53,18 +53,23 @@ ppl::common::RetCode flash_attn2_fmha(
     const int64_t mask_stride_s,            // can be broadcasted to batches and heads
     const int64_t mask_stride_h,
     const int64_t alibi_slopes_stride_b,    // set batch stride to 0 for sharing coeff between batches
+    const int64_t output_stride_b,
     const int64_t output_stride_s,
+    const int64_t output_stride_h,
     const int64_t max_seqlen,
     const int64_t max_kvlen,
     const int64_t num_heads,
     const int64_t num_kv_heads,
-    const int64_t head_dim,
-    const int64_t is_causal,
+    // const int64_t head_dim,
+    const int64_t qk_head_dim,
+    const int64_t v_head_dim,
+    const bool is_causal,
+    const bool is_mla,
     const int64_t quant_bit,                    // 0 for no quant, 8 for 8bit int
     const int64_t quant_group,
     const float attn_scale,
-    void* output);                              // device ptr, (b, max_seqlen, num_heads, head_dim)
-
+    void* output);
+   
 ppl::common::RetCode flash_attn2_paged_fmha(
     const cudaStream_t stream,
     const cudaDeviceProp& device_prop,
@@ -94,13 +99,17 @@ ppl::common::RetCode flash_attn2_paged_fmha(
     const int64_t mask_stride_s,
     const int64_t mask_stride_h,
     const int64_t alibi_slopes_stride_b,
+    const int64_t output_stride_b,
     const int64_t output_stride_s,
+    const int64_t output_stride_h,
     const int64_t max_seqlen,
     const int64_t max_kvlen,
     const int64_t num_heads,
     const int64_t num_kv_heads,
-    const int64_t head_dim,
-    const int64_t is_causal,
+    const int64_t qk_head_dim,
+    const int64_t v_head_dim,
+    const bool is_causal,
+    const bool is_mla,
     const int64_t page_block_size,
     const int64_t block_table_batch_stride,
     const int64_t quant_bit,           // 0 for no quant, 8 for 8bit int
