@@ -2139,6 +2139,7 @@ ppl::common::RetCode dynamic_batching_multi_head_cache_attention::forward_prefil
 
             const void* prefill_key_scale   = ((fp16_t*)cfg.scale) + cfg.layer_idx * (int64_t)(cfg.cache_stride_l / quant_group);
             const void* prefill_value_scale = ((fp16_t*)prefill_key_scale) + (int64_t)(cfg.cache_stride_kv / quant_group);
+            const void* prefill_cachestarts = ((int64_t*)cfg.cachestarts) + cfg.decoding_batches * cfg.cachestarts_stride_b;
 
             return llm::cuda::flash_attn2::flash_attn2_paged_fmha(
                 stream,
@@ -2150,7 +2151,7 @@ ppl::common::RetCode dynamic_batching_multi_head_cache_attention::forward_prefil
                 cfg.attn_mask,
                 prefill_seqstart_q,
                 prefill_seqstart_k,
-                cfg.cachestarts,
+                prefill_cachestarts,
                 nullptr,
                 prefill_key_scale,
                 prefill_value_scale,
