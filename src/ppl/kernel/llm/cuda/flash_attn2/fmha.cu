@@ -55,13 +55,17 @@ ppl::common::RetCode flash_attn2_fmha(
     const int64_t mask_stride_s,            // can be broadcasted to batches and heads
     const int64_t mask_stride_h,
     const int64_t alibi_slopes_stride_b,    // set batch stride to 0 for sharing coeff between batches
+    const int64_t output_stride_b,
     const int64_t output_stride_s,
+    const int64_t output_stride_h,
     const int64_t max_seqlen,
     const int64_t max_kvlen,
     const int64_t num_heads,
     const int64_t num_kv_heads,
-    const int64_t head_dim,
-    const int64_t is_causal,
+    const int64_t qk_head_dim,
+    const int64_t v_head_dim,
+    const bool is_causal,
+    const bool is_mla,
     const int64_t quant_bit,                    // 0 for no quant, 8 for 8bit int
     const int64_t quant_group,
     const float attn_scale,
@@ -71,6 +75,17 @@ ppl::common::RetCode flash_attn2_fmha(
     if (datatype != ppl::common::DATATYPE_FLOAT16) {
         LOG(ERROR) << "flash attention v2 for ppl only support fp16!";
         return ppl::common::RC_UNSUPPORTED;
+    }
+    if (is_mla) {
+        if (qk_head_dim != 192) {
+            LOG(ERROR) << "mla only support qk_head_dim 192, but get: " << qk_head_dim;
+            return ppl::common::RC_OTHER_ERROR;
+        }
+    } else {
+        if (qk_head_dim != v_head_dim) {
+            LOG(ERROR) << "qk_head_dim [" << qk_head_dim << "]!= v_head_dim: [" << v_head_dim << "]"; 
+            return ppl::common::RC_OTHER_ERROR;
+        }
     }
 
     run_fmha_fwd(
@@ -102,13 +117,17 @@ ppl::common::RetCode flash_attn2_fmha(
         mask_stride_s,                      // const int64_t mask_stride_s,
         mask_stride_h,                      // const int64_t mask_stride_h,
         alibi_slopes_stride_b,              // const int64_t alibi_slopes_stride_b,
+        output_stride_b,
         output_stride_s,                    // const int64_t output_stride_s,
+        output_stride_h,
         max_seqlen,                         // const int64_t max_seqlen,
         max_kvlen,                          // const int64_t max_kvlen,
         num_heads,                          // const int64_t num_heads,
         num_kv_heads,                       // const int64_t num_kv_heads,
-        head_dim,                           // const int64_t head_dim,
-        is_causal,                          // const int64_t is_causal,
+        qk_head_dim,
+        v_head_dim,
+        is_causal,                          // const bool is_causal,
+        is_mla,
         0,                                  // const int64_t cache_mode,          // 0 for normal, 1 for paged attention
         0,                                  // const int64_t page_block_size,
         0,                                  // const int64_t block_table_batch_stride,
@@ -151,13 +170,17 @@ ppl::common::RetCode flash_attn2_paged_fmha(
     const int64_t mask_stride_s,
     const int64_t mask_stride_h,
     const int64_t alibi_slopes_stride_b,
+    const int64_t output_stride_b,
     const int64_t output_stride_s,
+    const int64_t output_stride_h,
     const int64_t max_seqlen,
     const int64_t max_kvlen,
     const int64_t num_heads,
     const int64_t num_kv_heads,
-    const int64_t head_dim,
-    const int64_t is_causal,
+    const int64_t qk_head_dim,
+    const int64_t v_head_dim,
+    const bool is_causal,
+    const bool is_mla,
     const int64_t page_block_size,
     const int64_t block_table_batch_stride,
     const int64_t quant_bit,           // 0 for no quant, 8 for 8bit int
@@ -168,6 +191,11 @@ ppl::common::RetCode flash_attn2_paged_fmha(
     // TODO: bf16 currently is disabled for compilation speed
     if (datatype != ppl::common::DATATYPE_FLOAT16) {
         LOG(ERROR) << "flash attention v2 for ppl only support fp16!";
+        return ppl::common::RC_UNSUPPORTED;
+    }
+
+    if (is_mla == true) {
+        LOG(ERROR) << "page attn not support mla currently";
         return ppl::common::RC_UNSUPPORTED;
     }
 
@@ -205,13 +233,17 @@ ppl::common::RetCode flash_attn2_paged_fmha(
         mask_stride_s,                      // const int64_t mask_stride_s,
         mask_stride_h,                      // const int64_t mask_stride_h,
         alibi_slopes_stride_b,              // const int64_t alibi_slopes_stride_b,
+        output_stride_b,
         output_stride_s,                    // const int64_t output_stride_s,
+        output_stride_h,
         max_seqlen,                         // const int64_t max_seqlen,
         max_kvlen,                          // const int64_t max_kvlen,
         num_heads,                          // const int64_t num_heads,
         num_kv_heads,                       // const int64_t num_kv_heads,
-        head_dim,                           // const int64_t head_dim,
+        qk_head_dim,
+        v_head_dim,
         is_causal,                          // const int64_t is_causal,
+        is_mla,
         1,                                  // const int64_t cache_mode,          // 0 for normal, 1 for paged attention
         page_block_size,                    // const int64_t page_block_size,
         block_table_batch_stride,           // const int64_t block_table_batch_stride,

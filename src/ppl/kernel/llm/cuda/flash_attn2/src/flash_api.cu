@@ -12,6 +12,7 @@
 
 #include "flash.h"
 #include "static_switch.h"
+#include <assert.h>
 
 namespace ppl { namespace kernel { namespace llm { namespace cuda { namespace flash_attn2 {
 
@@ -19,14 +20,20 @@ void run_mha_fwd(Flash_fwd_params &params, cudaStream_t stream, bool force_split
     // remove bf16 for compilation speed
     //FP16_SWITCH(!params.is_bf16, [&] {
     using elem_type = cutlass::half_t;
-    {
-        HEADDIM_SWITCH(params.d, [&] {
+    if (params.is_mla) {
+        assert(params.qk_d == 192);
+        assert(params.num_splits <= 1 && !force_split_kernel);
+        MLA_HEADDIM_SWITCH(params.qk_d, [&] {
+            run_mha_fwd_mla_<elem_type, kQKHeadDim, 0, 0>(params, stream);
+        });
+    } else {
+        HEADDIM_SWITCH(params.qk_d, [&] {
             QUANTBIT_SWITCH(params.quant_bit, [&] {
                 constexpr static int QuantGroup = QuantBit;
                 if (params.num_splits <= 1 && !force_split_kernel) {  // If we don't set it num_splits == 0
-                    run_mha_fwd_<elem_type, kHeadDim, QuantBit, QuantGroup>(params, stream);
+                    run_mha_fwd_<elem_type, kQKHeadDim, QuantBit, QuantGroup>(params, stream);
                 } else {
-                    run_mha_fwd_splitkv_dispatch<elem_type, kHeadDim, QuantBit, QuantGroup>(params, stream);
+                    run_mha_fwd_splitkv_dispatch<elem_type, kQKHeadDim, QuantBit, QuantGroup>(params, stream);
                 }
             });
         });
@@ -62,13 +69,18 @@ void run_fmha_fwd(
     const int64_t mask_stride_s,
     const int64_t mask_stride_h,
     const int64_t alibi_slopes_stride_b,
+    const int64_t output_stride_b,
     const int64_t output_stride_s,
+    const int64_t output_stride_h,
     const int64_t max_seqlen,
     const int64_t max_kvlen,
     const int64_t num_heads,
     const int64_t num_kv_heads,
-    const int64_t head_dim,
-    const int64_t is_causal,
+    // const int64_t head_dim,
+    const int64_t qk_head_dim,
+    const int64_t v_head_dim,
+    const bool is_causal,
+    const bool is_mla,
     const int64_t cache_mode,          // 0 for normal, 1 for paged attention
     const int64_t page_block_size,
     const int64_t block_table_batch_stride,
@@ -77,6 +89,10 @@ void run_fmha_fwd(
     const float attn_scale,
     void* output)
 {
+    if (!is_mla) {
+        assert(qk_head_dim == v_head_dim);
+    }
+
     Flash_fwd_params params = {};
 
     params.dprops = &device_prop;
@@ -102,13 +118,13 @@ void run_fmha_fwd(
     params.v_row_stride  = value_stride_s;
     params.v_head_stride = value_stride_h;
     params.o_row_stride  = output_stride_s;
-    params.o_head_stride = query_stride_h; // same as q ?
+    params.o_head_stride = output_stride_h;
 
     // 0 for dynamic batch
     params.q_batch_stride = query_stride_b;
     params.k_batch_stride = key_stride_b;
     params.v_batch_stride = value_stride_b;
-    params.o_batch_stride = query_stride_b; // same as q?
+    params.o_batch_stride = output_stride_b; // same as q?
 
     // bias strides
     params.bias_batch_stride   = mask_stride_b;
@@ -130,7 +146,8 @@ void run_fmha_fwd(
     params.softmax_lse_ptr = nullptr; //p_lse;
 
     auto round_multiple = [](int x, int m) { return (x + m - 1) / m * m; };
-    const int head_dim_rounded = round_multiple((int)head_dim, 32);
+    const int qk_head_dim_rounded = round_multiple((int)qk_head_dim, 32);
+    const int v_head_dim_rounded = round_multiple((int)v_head_dim, 32);
     const int max_seqlen_rounded = round_multiple((int)max_seqlen, 128);
     const int max_kvlen_rounded = round_multiple((int)max_kvlen, 128);
 
@@ -143,8 +160,11 @@ void run_fmha_fwd(
     params.seqlen_k = max_kvlen;
     params.seqlen_q_rounded = max_seqlen_rounded;
     params.seqlen_k_rounded = max_kvlen_rounded;
-    params.d = head_dim;
-    params.d_rounded = head_dim_rounded;
+    params.qk_d = qk_head_dim;
+    params.v_d = v_head_dim;
+    // params.d_rounded = head_dim_rounded;
+    params.qk_d_rounded = qk_head_dim_rounded;
+    params.v_d_rounded = v_head_dim_rounded;
 
     params.scale_softmax = attn_scale;
     params.scale_softmax_log2 = attn_scale * M_LOG2E;
@@ -181,7 +201,8 @@ void run_fmha_fwd(
     // kv quant group
     params.quant_bit = quant_bit;
     params.quant_group = quant_group;
-
+    // mla
+    params.is_mla = is_mla;
     run_mha_fwd(params, stream, paged_KVCache);
 }
 
