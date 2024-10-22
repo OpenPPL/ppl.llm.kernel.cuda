@@ -81,7 +81,9 @@ struct Flash_fwd_params : public Qkv_params {
     void * __restrict__ softmax_lseaccum_ptr;
 
     // The dimensions.
-    int b, seqlen_q, seqlen_k, seqlen_knew, d, seqlen_q_rounded, seqlen_k_rounded, d_rounded, rotary_dim;
+    int b, seqlen_q, seqlen_k, seqlen_knew /*, d*/, seqlen_q_rounded, seqlen_k_rounded /*, d_rounded*/, rotary_dim;
+    int qk_d, v_d;
+    int qk_d_rounded, v_d_rounded;
 
     // The scaling factors for the kernel.
     float scale_softmax;
@@ -145,6 +147,7 @@ struct Flash_fwd_params : public Qkv_params {
 
     bool is_bf16;
     bool is_causal;
+    bool is_mla;
 
     // If is_seqlens_k_cumulative, then seqlen_k is cu_seqlens_k[bidb + 1] - cu_seqlens_k[bidb].
     // Otherwise it's cu_seqlens_k[bidb], i.e., we use cu_seqlens_k to store the sequence lengths of K.
@@ -207,5 +210,7 @@ struct Flash_fwd_params : public Qkv_params {
 
 template<typename T, int Headdim, int QuantBit, int QuantGroup> void run_mha_fwd_(Flash_fwd_params &params, cudaStream_t stream);
 template<typename T, int Headdim, int QuantBit, int QuantGroup> void run_mha_fwd_splitkv_dispatch(Flash_fwd_params &params, cudaStream_t stream);
+
+template<typename T, int QKHeaddim, int QuantBit, int QuantGroup> void run_mha_fwd_mla_(Flash_fwd_params &params, cudaStream_t stream);
 
 // template<typename T, int Headdim> void run_mha_bwd_(Flash_bwd_params &params, cudaStream_t stream);
