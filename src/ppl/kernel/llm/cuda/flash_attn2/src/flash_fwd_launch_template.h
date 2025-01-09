@@ -395,7 +395,7 @@ void run_mha_fwd_mla_hdim192(Flash_fwd_params &params, cudaStream_t stream) {
     DROPOUT_SWITCH(params.p_dropout < 1.f, Is_dropout, [&] {
         BOOL_SWITCH(params.is_causal, Is_causal, [&] {
             if constexpr(!Is_dropout) {
-                run_flash_fwd<Flash_fwd_kernel_traits<QKHeaddim, VHeaddim, 128, 64, 8, false, false, T, QuantBit, QuantGroup>, Is_dropout, Is_causal>(params, stream);
+                run_flash_fwd<Flash_fwd_kernel_traits<QKHeaddim, VHeaddim, 64, 64, 4, false, false, T, QuantBit, QuantGroup>, Is_dropout, Is_causal>(params, stream);
             } else {
                 run_flash_fwd<Flash_fwd_kernel_traits<QKHeaddim, VHeaddim, 64, 64, 4, false, false, T, QuantBit, QuantGroup>, Is_dropout, Is_causal>(params, stream);
             }
